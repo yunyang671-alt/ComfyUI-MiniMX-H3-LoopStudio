@@ -6,8 +6,6 @@
   "DEPENDENCIES.md": "a5377a0c6d7bdd7097a08a8d5219de2ca4641dbb9769cd21e66f37ec1fe48c1b",
   "diagnostics.py": "61ec9cf852444f15d989d297236df35194ce1bb7c0280036921c6c5e7cdd4250",
   "docs/RUNNINGHUB_REQUEST.md": "0f3883c36460632e12c0d301f58d625456781c0538ccb1c1fa775ca4693b1008",
-  "docs/upstream/Loop-PROMPTING.md": "4109c16d24b1c4de33166791fbab76333b4a9ac31275d4c788c42aca4ed87953",
-  "docs/upstream/Loop-README.md": "236dc749cdb2a108cd7ba4f1c2a6efd6743f51d9f4bc17fd4391d6cd2c30829a",
   "docs/VALIDATION.md": "27059d6680888143ba480c26a20d3d01c62167519688fcb533f9b204bded08cc",
   "h3_dependencies.py": "d06dd548cbb0eb4e57b344f3cafb1f0d8fc010338e3a6e4d918d2d89a0942a1a",
   "h3_latent_upscaler_embedded.py": "c6d1ea370fd2e4b879db92b613668231130906fdf506eee10e0510398d512f2c",
@@ -33,7 +31,7 @@
   "selflift_vendor/nodes.py": "c20f084cba79b158d4e418fc064dd555c863c5438913a93c4530d17ab49603b4",
   "selflift_vendor/selflift.py": "866ccdbe6dc37797cef6d36a8f823836d80e141891b38b0a457b4e9cc8f998ce",
   "studio.py": "b91b7b960508f52c112f1bc99544c2aa7175daf62d7d43278031bc0bb929be60",
-  "THIRD_PARTY_NOTICES.md": "fc259b83ea991915b43ba7a1ddb0f3a61254a1796692d9fa417ffab2754bcdc9",
+  "THIRD_PARTY_NOTICES.md": "257d1c404240bceec14c77a05f650b55a8bdd2b2131b7fb8abfc0536f522383c",
   "tools/check_server.py": "2cbc84a07d9cfdd3d048f04e696c3efe36d1a649252cc7402a35144bb8b5a3f7",
   "tools/verify_package.py": "90c52632fb97a0fbccb7c7b9cece2d1912d29659d8b3c3b968ff02fe238eb786"
 }

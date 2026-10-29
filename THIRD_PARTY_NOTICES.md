@@ -21,7 +21,7 @@
 
 `__init__.py` 原样保存为 `_loop_vendor.py`。上游 Git blob：`436156f86671cbc00bd7b2f68c8de36ac6d6e673`。本包校验此指纹并通过私有模块调用，仅导出自身命名空间的解码 ID。
 
-许可：GPL-3.0，完整正文在 [`licenses/Loop-GPL-3.0.txt`](licenses/Loop-GPL-3.0.txt)。上游 README / PROMPTING 随包保留于 `docs/upstream/`，没有复制其中引用的工作流 JSON 或媒体。有关本包自行编写的循环适配代码，也按 GPL-3.0 发布；这不改变其他上游代码的许可状态。
+许可：GPL-3.0，完整正文在 [`licenses/Loop-GPL-3.0.txt`](licenses/Loop-GPL-3.0.txt)。上游功能说明请参见原仓库，本包不收录其示例工作流说明、工作流 JSON 或媒体。有关本包自行编写的循环适配代码，也按 GPL-3.0 发布；这不改变其他上游代码的许可状态。
 
 ## facok / comfyui-SelfLift
 
