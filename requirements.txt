@@ -1,0 +1,9 @@
+# Uses the torch version installed by ComfyUI; never install a second torch here.
+numpy
+safetensors
+aiohttp
+Pillow
+psutil
+opencv-python
+imageio-ffmpeg
+# torchaudio must match the existing torch build (provided by ComfyUI).

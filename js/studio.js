@@ -1,0 +1,3477 @@
+import { seedControl } from "./seed_control.js";
+import { installLoopControls } from "./loop_controls.js";
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+
+let lastSageWarningAt = 0;
+api.addEventListener("minimxa_loop_h3_sage_warning", (event) => {
+  const now = Date.now();
+  if (now - lastSageWarningAt < 2000) return;
+  lastSageWarningAt = now;
+  const detail = event?.detail || {};
+  window.alert(
+    `${detail.title || "未检测到 SageAttention 2.2"}\n\n` +
+    `${detail.message || "没有安装 SageAttention 仍可继续生成，但速度可能明显变慢，建议安装。"}`
+  );
+});
+
+const TARGET = "MiniMXH3LoopStudio";
+const MEDIA = {
+  图片: { count: 20, accept: "image/png,image/jpeg,image/webp,image/bmp", icon: "▧" },
+  视频: { count: 3, accept: "video/mp4,video/webm,video/quicktime,video/x-matroska", icon: "▶" },
+  音频: { count: 3, accept: "audio/*,.mp3,.wav,.flac,.m4a,.aac,.ogg,.opus,.wma,.aiff,.aif", icon: "♫" },
+};
+
+const w = (node, name) => node.widgets?.find((item) => item.name === name);
+const values = (widget) => widget?.options?.values || widget?.options?.items || [];
+// Shared filename normalizer used by the model and LoRA ranking helpers.
+// This must live at module scope because the preset buttons call the helpers
+// before entering applyPerformancePreset's local scope.
+const lower = (value) => String(value || "").replaceAll("\\", "/").toLowerCase();
+const PREFERRED_H3_TURBO_LORA = "minimax_h3_dmad_full_dareties_v4_step600_comfy_fro";
+const PREFERRED_H3_BALANCED_LORA = "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16";
+const PREFERRED_H3_REF_TURBO_LORA = "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16";
+function pickMinimaxH3TurboLora(installedLoras) {
+  const ranked = [];
+  for (let index = 0; index < installedLoras.length; index++) {
+    const value = String(installedLoras[index] || "");
+    const normalized = lower(value).replaceAll("\\", "/");
+    const compact = normalized.replace(/[^a-z0-9]/g, "");
+    if (normalized.includes(PREFERRED_H3_TURBO_LORA)) return value;
+    if (!compact.includes("minimaxh3")) continue;
+    let score = 0;
+    if (compact.includes("fl2v") || compact.includes("fl2va")) score += 50;
+    if (compact.includes("turbo")) score += 40;
+    if (compact.includes("4step")) score += 30;
+    if (compact.includes("comfyui")) score += 10;
+    if (compact.includes("bf16")) score += 5;
+    if (compact.includes("lightx2v")) score += 25;
+    ranked.push({ value, score, index });
+  }
+  ranked.sort((a, b) => b.score - a.score || a.index - b.index);
+  return ranked[0]?.value || "";
+}
+function pickMinimaxH3BalancedLora(installedLoras) {
+  const ranked = [];
+  for (let index = 0; index < installedLoras.length; index++) {
+    const value = String(installedLoras[index] || "");
+    const normalized = lower(value).replaceAll("\\", "/");
+    const compact = normalized.replace(/[^a-z0-9]/g, "");
+    if (normalized.includes(PREFERRED_H3_BALANCED_LORA)) return value;
+    if (!compact.includes("minimaxh3") || !compact.includes("8step") || compact.includes("4step")) continue;
+    let score = 0;
+    if (compact.includes("fl2v") || compact.includes("fl2va")) score += 50;
+    if (compact.includes("turbo")) score += 40;
+    if (compact.includes("comfyui")) score += 10;
+    if (compact.includes("bf16")) score += 5;
+    ranked.push({ value, score, index });
+  }
+  ranked.sort((a, b) => b.score - a.score || a.index - b.index);
+  return ranked[0]?.value || "";
+}
+function pickMinimaxH3RefTurboLora(installedLoras, preferredSteps = 4) {
+  const ranked = [];
+  const stepTag = `${Number(preferredSteps) || 4}step`;
+  for (let index = 0; index < installedLoras.length; index++) {
+    const value = String(installedLoras[index] || "");
+    const normalized = lower(value).replaceAll("\\", "/");
+    const compact = normalized.replace(/[^a-z0-9]/g, "");
+    if (normalized.includes(PREFERRED_H3_REF_TURBO_LORA)) return value;
+    if (!compact.includes("minimaxh3") || (!compact.includes("ref2v") && !compact.includes("ref2va"))) continue;
+    let score = 0;
+    if (compact.includes("turbo")) score += 80;
+    if (compact.includes(stepTag)) score += 40;
+    if (compact.includes("comfyui")) score += 10;
+    if (compact.includes("bf16")) score += 5;
+    ranked.push({ value, score, index });
+  }
+  ranked.sort((a, b) => b.score - a.score || a.index - b.index);
+  return ranked[0]?.value || "";
+}
+const NUMERIC_WIDGETS = new Set([
+  "百万像素", "尺寸倍数", "时长秒", "分镜数", "随机种子", "采样步数", "降噪强度", "Llama上下文",
+  "视频SigmaShift", "音频SigmaShift", "LoRA1强度", "LoRA2强度", "LoRA3强度", "LoRA4强度", "LoRA5强度", "LoRA6强度",
+]);
+const NUMERIC_RULES = {
+  百万像素: [0.4, 0.2, 2.0], 尺寸倍数: [32, 32, 32], 时长秒: [5, 1, 15], 分镜数: [2, 1, 12],
+  随机种子: [470115107471061, 0, Number.MAX_SAFE_INTEGER], 采样步数: [6, 1, 100],
+  降噪强度: [1, 0, 1], Llama上下文: [8192, 1024, 131072],
+  视频SigmaShift: [10, 0, 100], 音频SigmaShift: [3, 0, 100],
+  LoRA1强度: [0.75, -4, 4], LoRA2强度: [1, -4, 4],
+  LoRA3强度: [1, -4, 4], LoRA4强度: [1, -4, 4], LoRA5强度: [1, -4, 4], LoRA6强度: [1, -10, 10],
+};
+function setW(node, name, value) {
+  const target = w(node, name);
+  if (!target) return;
+  if (name === "云端APIKey") {
+    const key = String(value || "").trim();
+    try {
+      if (key) localStorage.setItem("minimxa.loop.h3.cloudApiKey", key);
+      else localStorage.removeItem("minimxa.loop.h3.cloudApiKey");
+    } catch (error) { console.warn("[Liao-H3] 浏览器无法保存 API Key", error.name); }
+  }
+  if (NUMERIC_WIDGETS.has(name) || typeof target.value === "number") value = Number(value);
+  if (typeof target.value === "boolean") value = Boolean(value);
+  target.value = value;
+  target.callback?.(value);
+  node.setDirtyCanvas?.(true, true);
+}
+function hide(widget) {
+  if (!widget) return;
+  widget.hidden = true;
+  widget.computeSize = () => [0, -4];
+  if (widget.element) widget.element.style.display = "none";
+}
+function repairNumber(node, name, fallback) {
+  const widget = w(node, name);
+  if (!widget) return;
+  const [safeFallback, min, max] = NUMERIC_RULES[name] || [fallback, -Infinity, Infinity];
+  const raw = widget.value;
+  const numeric = Number(widget.value);
+  const valid = raw !== "" && raw !== null && raw !== undefined && Number.isFinite(numeric) && numeric >= min && numeric <= max;
+  setW(node, name, valid ? numeric : safeFallback);
+}
+function repairChoice(node, name, fallback) {
+  const widget = w(node, name);
+  const choices = values(widget);
+  if (!widget || choices.includes(widget.value)) return;
+  setW(node, name, choices.includes(fallback) ? fallback : choices[0]);
+}
+function rememberWidgetChoice(widget, value) {
+  if (!widget || !value || value === "未选择") return;
+  const choices = values(widget);
+  if (Array.isArray(choices) && !choices.includes(value)) choices.push(value);
+}
+function repairMainState(node) {
+  for (const [name, fallback] of [
+    ["百万像素", 0.4], ["尺寸倍数", 32], ["时长秒", 5], ["分镜数", 2],
+    ["随机种子", 470115107471061], ["采样步数", 6], ["降噪强度", 1],
+    ["Llama上下文", 8192],
+  ]) repairNumber(node, name, fallback);
+  repairChoice(node, "画面比例", "16:9 (Widescreen)");
+  repairChoice(node, "采样器", "euler");
+  repairChoice(node, "调度器", "simple");
+  repairChoice(node, "参考图尺寸", "match");
+  repairChoice(node, "Llama运算设备", "自动");
+  repairChoice(node, "提示词服务", "本地 Llama");
+  const promptTemplate = w(node, "提示词模板");
+  repairChoice(node, "提示词模板", "官方 MiniMax H3");
+  repairChoice(node, "加速方案", "参考工作流加速");
+  repairChoice(node, "文本编码器类型", "minimax");
+  repairChoice(node, "文本编码器设备", "default");
+  repairChoice(node, "模型权重精度", "default");
+  setW(node, "SageAttention", "auto");
+  for (const name of ["模型", "文本编码器", "视频VAE", "音频VAE"]) {
+    if (w(node, "启用周期循环")?.value && w(node, name)?.value) rememberWidgetChoice(w(node, name), w(node, name).value);
+    else repairChoice(node, name, "");
+  }
+  // 上传接口返回的新文件不会立即出现在节点创建时缓存的下拉选项里。
+  // 不能用 repairChoice 判无效，否则 onSerialize 会把可见素材悄悄重置成“未选择”。
+  for (const kind of ["图片", "视频", "音频"]) {
+    for (let index = 1; index <= MEDIA[kind].count; index++) {
+      const widget = w(node, `${kind}${index}`);
+      if (!widget) continue;
+      if (!widget.value) setW(node, `${kind}${index}`, "未选择");
+      else rememberWidgetChoice(widget, widget.value);
+    }
+  }
+  // 旧版本可能依据错误 MIME 把 .mp4 放进图片槽。按真实扩展名重新分桶并写回工作流。
+  const repairedMedia = { 图片: [], 视频: [], 音频: [] };
+  const preserveMvVideoAudio = Boolean(w(node, "MV数字人")?.value);
+  for (const declaredKind of Object.keys(MEDIA)) {
+    for (const filename of selected(node, declaredKind)) {
+      let actualKind = inferKindFromName(filename) || declaredKind;
+      // MV 音乐槽允许保存带音轨的视频文件。它仍属于音频参考，
+      // 不能在载入旧工作流时被自动挪进视频参考槽。
+      if (preserveMvVideoAudio && declaredKind === "音频" && actualKind === "视频") actualKind = "音频";
+      if (repairedMedia[actualKind].length < MEDIA[actualKind].count) repairedMedia[actualKind].push(filename);
+    }
+  }
+  for (const kind of Object.keys(MEDIA)) writeSelected(node, kind, repairedMedia[kind]);
+  for (const name of ["LoRA1", "LoRA2"]) {
+    if (w(node, "启用周期循环")?.value && w(node, name)?.value) rememberWidgetChoice(w(node, name), w(node, name).value);
+    else repairChoice(node, name, "无");
+  }
+  const editProfile = w(node, "视频编辑模式");
+  if (["快速6步", "极速6步", "快速创意编辑6步（弱保留）"].includes(String(editProfile?.value || ""))) {
+    setW(node, "视频编辑模式", "极速4步");
+  } else if (String(editProfile?.value || "") === "精准人物替换20步") {
+    setW(node, "视频编辑模式", "质量20步");
+  } else {
+    if (["均衡12步", "均衡10步"].includes(String(editProfile?.value || ""))) setW(node, "视频编辑模式", "均衡8步");
+    else repairChoice(node, "视频编辑模式", "均衡8步");
+  }
+  repairChoice(node, "视频编辑功能", "通用编辑");
+  for (const name of ["文生视频", "图生视频", "首尾帧", "视频编辑", "数字人", "双人数字人", "MV数字人", "多参考连续拼接", "启用提示词增强", "仅增强提示词"]) {
+    const widget = w(node, name);
+    if (widget && typeof widget.value !== "boolean") setW(node, name, false);
+  }
+}
+function repairConfigState(node) {
+  repairNumber(node, "视频SigmaShift", 10.0);
+  repairNumber(node, "音频SigmaShift", 3.0);
+  repairNumber(node, "LoRA1强度", 0.75);
+  repairNumber(node, "LoRA2强度", 1.0);
+  for (let index = 3; index <= 6; index++) {
+    repairChoice(node, `LoRA${index}`, "无");
+    repairNumber(node, `LoRA${index}强度`, 1.0);
+  }
+  repairChoice(node, "加速方案", "参考工作流加速");
+  repairChoice(node, "文本编码器类型", "minimax");
+  repairChoice(node, "文本编码器设备", "default");
+  repairChoice(node, "模型权重精度", "default");
+  repairChoice(node, "SageAttention", "auto");
+}
+function selected(node, kind) {
+  const list = [];
+  for (let i = 1; i <= MEDIA[kind].count; i++) {
+    const value = w(node, `${kind}${i}`)?.value;
+    if (value && value !== "未选择") list.push(value);
+  }
+  return list;
+}
+function writeSelected(node, kind, list) {
+  for (let i = 1; i <= MEDIA[kind].count; i++) {
+    const value = list[i - 1] || "未选择";
+    const widget = w(node, `${kind}${i}`);
+    rememberWidgetChoice(widget, value);
+    setW(node, `${kind}${i}`, value);
+  }
+}
+function mediaUrl(filename) {
+  const parts = String(filename).replace(/\\/g, "/").split("/");
+  const name = parts.pop();
+  const folder = parts.join("/");
+  return api.apiURL(`/view?filename=${encodeURIComponent(name)}&type=input${folder ? `&subfolder=${encodeURIComponent(folder)}` : ""}`);
+}
+function safeUploadName(filename) {
+  // ComfyUI /view rejects '..' anywhere, even harmless title ellipses.
+  return String(filename).replace(/[\\/]/g, "_").replace(/\.{2,}/g, "_");
+}
+function inferKindFromName(filename) {
+  const ext = String(filename || "").split("[")[0].split(".").pop()?.toLowerCase();
+  if (["png", "jpg", "jpeg", "webp", "bmp", "gif"].includes(ext)) return "图片";
+  if (["mp4", "mov", "webm", "mkv", "avi", "m4v"].includes(ext)) return "视频";
+  if (["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus", "wma", "aiff", "aif"].includes(ext)) return "音频";
+}
+function inferKind(file) {
+  const filenameKind = inferKindFromName(file.name);
+  if (filenameKind) return filenameKind;
+  if (file.type.startsWith("image/")) return "图片";
+  if (file.type.startsWith("video/")) return "视频";
+  if (file.type.startsWith("audio/")) return "音频";
+}
+async function upload(file) {
+  const body = new FormData();
+  body.append("image", file, safeUploadName(file.name));
+  body.append("type", "input");
+  body.append("overwrite", "true");
+  const response = await api.fetchApi("/upload/image", { method: "POST", body });
+  if (!response.ok) throw new Error(`上传失败 HTTP ${response.status}`);
+  const result = await response.json();
+  return result.subfolder ? `${result.subfolder}/${result.name}` : result.name;
+}
+async function promptOnly(nodeId) {
+  const prompt = structuredClone(await app.graphToPrompt());
+  const output = prompt.output || {};
+  const keep = new Set();
+  const visit = (id) => {
+    id = String(id);
+    if (!output[id] || keep.has(id)) return;
+    keep.add(id);
+    for (const value of Object.values(output[id].inputs || {})) {
+      if (Array.isArray(value)) visit(value[0]);
+    }
+  };
+  visit(nodeId);
+  prompt.output = Object.fromEntries(Object.entries(output).filter(([id]) => keep.has(id)));
+  return prompt;
+}
+
+function addStyle() {
+  if (document.getElementById("liao2049-h3-aurora-v1")) return;
+  const style = document.createElement("style");
+  style.id = "liao2049-h3-aurora-v1";
+  style.textContent = `
+.wwh3{width:100%;height:100%;overflow:visible;padding:7px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;color:#eaffff;font:12px/1.45 'Microsoft YaHei UI',sans-serif;background:radial-gradient(circle at 8% 0,#00dfc044,transparent 30%),radial-gradient(circle at 92% 16%,#6d54ee44,transparent 33%),linear-gradient(155deg,#04151b,#081329 52%,#150b29);border:1px solid #42dfce;border-radius:14px;box-shadow:inset 0 0 35px #00bda826,0 0 20px #5669e644}
+  .wwh3 *{box-sizing:border-box}.wwh3-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:13px 15px;border:1px solid #62ffe5;border-radius:12px;background:linear-gradient(105deg,#087a82,#2454a1 48%,#873a99);box-shadow:0 0 18px #25d9cc44}.wwh3-title{font-size:17px;font-weight:800;letter-spacing:.5px}.wwh3-chip{padding:4px 9px;border:1px solid #89ffe9;border-radius:99px;background:#071a26aa;color:#bafff3;font-size:10px;white-space:nowrap}
+  .wwh3-card{flex:none;border:1px solid #266f83;border-radius:11px;background:linear-gradient(145deg,#071923e8,#0a1024e8 65%,#160d25e8);overflow:hidden}.wwh3-card-title{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;font-weight:700;background:linear-gradient(90deg,#0a4d5c,#17345f 55%,#462556);border-bottom:1px solid #287d8e}.wwh3-card-body{padding:11px;display:flex;flex-direction:column;gap:9px}
+  .wwh3 label{display:flex;flex-direction:column;gap:4px;color:#a9deda;font-size:11px;min-width:0}.wwh3 textarea,.wwh3 select,.wwh3 input{width:100%;min-width:0;border:1px solid #288f95;border-radius:7px;background:#041118;color:#eaffff;padding:7px;outline:none}.wwh3 textarea:focus,.wwh3 select:focus,.wwh3 input:focus{border-color:#63f7df;box-shadow:0 0 12px #37dbc955}.wwh3 textarea{min-height:82px;resize:vertical;font:13px/1.55 Consolas,'Microsoft YaHei UI',sans-serif}.wwh3 textarea.wwh3-idea{height:164px;min-height:164px!important}.wwh3-model-file select{font-size:11px;text-overflow:ellipsis;white-space:nowrap;overflow:hidden}
+  .wwh3-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.wwh3 button{border:1px solid #339c9d;border-radius:7px;background:linear-gradient(145deg,#0b343c,#172b58);color:#eaffff;padding:7px 12px;cursor:pointer}.wwh3 button:hover{border-color:#76ffe5;box-shadow:0 0 12px #34d7c766}.wwh3 button:disabled{opacity:.45;cursor:wait}.wwh3-primary{font-weight:800!important;background:linear-gradient(95deg,#009f91,#376cd2 55%,#9c3cae)!important;border-color:#69f8df!important}.wwh3-status{color:#9ceade;font-size:11px}.wwh3-final{border-color:#5c58b8!important;background:#080d20!important}.wwh3-final.editing{border-color:#ff63d1!important}
+  .wwh3-progress{display:flex;flex-direction:column;gap:5px;padding:7px 9px;border:1px solid #2b7788;border-radius:8px;background:#040f1c}.wwh3-progress[hidden]{display:none}.wwh3-progress-head{display:flex;justify-content:space-between;gap:12px;color:#a9eee4;font-size:11px}.wwh3-progress-track{height:9px;overflow:hidden;border:1px solid #285d78;border-radius:99px;background:#07101e;box-shadow:inset 0 0 8px #000}.wwh3-progress-bar{height:100%;width:0;border-radius:inherit;background:linear-gradient(90deg,#00b6a8,#387ce4 58%,#b64dc7);box-shadow:0 0 12px #3debd5;transition:width .22s ease}.wwh3-progress.indeterminate .wwh3-progress-bar{width:38%!important;animation:wwh3-progress-scan 1.15s ease-in-out infinite}.wwh3-progress.error{border-color:#d64d73}.wwh3-progress.error .wwh3-progress-bar{background:linear-gradient(90deg,#cb365f,#ff835f)}@keyframes wwh3-progress-scan{0%{transform:translateX(-110%)}100%{transform:translateX(290%)}}
+  .wwh3-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.wwh3-llama-grid{grid-template-columns:minmax(0,1.3fr) minmax(0,1.3fr) minmax(105px,.65fr)}.wwh3-core-grid{grid-template-columns:minmax(125px,1fr) minmax(165px,1.22fr) minmax(88px,.68fr) minmax(118px,.86fr) minmax(168px,1.16fr) minmax(112px,.72fr)}.wwh3-field-wide{grid-column:1/-1}.wwh3-mode{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.wwh3-mode button.on,.wwh3-submode button.on{background:linear-gradient(100deg,#008f87,#4a55c5)!important;border-color:#7fffe6!important;box-shadow:0 0 12px #35dbc866}.wwh3-edit-speed{display:grid;grid-template-columns:minmax(112px,.72fr) repeat(3,minmax(0,1fr));gap:7px;align-items:stretch;padding:8px;border:1px solid #315579;border-radius:12px;background:linear-gradient(100deg,#07111d,#0b1729 60%,#121126);box-shadow:inset 0 0 16px #010712}.wwh3-speed-caption{display:flex;flex-direction:column;justify-content:center;gap:3px;padding:2px 8px;border-right:1px solid #28435e}.wwh3-speed-caption strong{color:#d9ffff;font-size:12px;letter-spacing:.5px}.wwh3-speed-caption small{color:#718fa1;font-size:9px;white-space:nowrap}.wwh3-edit-speed button{display:flex;align-items:center;justify-content:flex-start;gap:8px;min-width:0;padding:8px 10px;border-color:#263f5d;background:#091827!important;text-align:left}.wwh3-speed-icon{display:grid;place-items:center;flex:0 0 25px;height:25px;border-radius:8px;background:#18283b;color:#a8bfd2;font-size:14px}.wwh3-speed-copy{display:flex;flex-direction:column;min-width:0;line-height:1.15}.wwh3-speed-copy b{font-size:11px;color:#e9ffff}.wwh3-speed-copy small{margin-top:3px;color:#7896a8;font-size:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.wwh3-edit-speed button.profile-fast.on{border-color:#ffb05b!important;background:linear-gradient(110deg,#593019,#20203a)!important;box-shadow:0 0 13px #ff8a3444}.wwh3-edit-speed button.profile-fast.on .wwh3-speed-icon{background:#ff9a3d;color:#1b0c00}.wwh3-edit-speed button.profile-balanced.on{border-color:#4de6d0!important;background:linear-gradient(110deg,#06483f,#162552)!important;box-shadow:0 0 13px #29d7c544}.wwh3-edit-speed button.profile-balanced.on .wwh3-speed-icon{background:#32d7c3;color:#021612}.wwh3-edit-speed button.profile-quality.on{border-color:#bd7cff!important;background:linear-gradient(110deg,#3a225b,#1e2859)!important;box-shadow:0 0 13px #a85dff44}.wwh3-edit-speed button.profile-quality.on .wwh3-speed-icon{background:#a968f0;color:#160522}.wwh3-submode{display:flex;gap:7px;padding:7px;border:1px solid #285d78;border-radius:8px;background:#061520}.wwh3-submode:before{content:'数字人类型';align-self:center;color:#9ceade;margin-right:auto}.wwh3-submode button{min-width:110px}
+  .wwh3-edit-speed{grid-template-columns:minmax(100px,.62fr) repeat(4,minmax(0,1fr))}.wwh3-custom-speed{display:flex;align-items:center;justify-content:center;gap:6px;min-width:0;padding:7px 8px;border:1px solid #314763;border-radius:7px;background:#091827;cursor:pointer}.wwh3-custom-speed.on{border-color:#ff69cf;box-shadow:0 0 13px #e54ab944;background:linear-gradient(110deg,#41203d,#17264e)}.wwh3-custom-speed span{font-weight:700;white-space:nowrap}.wwh3-custom-speed input{width:54px!important;padding:5px!important;text-align:center}.wwh3-custom-speed small{color:#7896a8;white-space:nowrap}.wwh3-enhance-head{display:grid;grid-template-columns:minmax(180px,220px) minmax(240px,320px);gap:8px;align-items:end;justify-content:start}.wwh3-switch{min-height:57px;display:flex!important;flex-direction:row!important;align-items:center;justify-content:space-between;padding:7px 10px;border:1px solid #288f95;border-radius:7px;background:#061520;color:#bdf4ed!important}.wwh3-switch input{appearance:none;width:44px!important;height:24px!important;border-radius:99px!important;padding:0!important;cursor:pointer;background:radial-gradient(circle at 11px 50%,#c6d2d4 0 7px,transparent 7.5px),#26383e!important;transition:.2s}.wwh3-switch input:checked{border-color:#5effe3!important;background:radial-gradient(circle at 32px 50%,#fff 0 7px,transparent 7.5px),linear-gradient(90deg,#00a995,#5d61e8)!important;box-shadow:0 0 12px #36e5ce88}
+  .wwh3-media-toolbar{display:flex;align-items:center;gap:8px;min-height:42px;padding:6px;border:1px dashed #3a9da1;border-radius:9px;background:#050e1a}.wwh3-media-toolbar.drag{border-color:#7effe5;background:#0a333b}.wwh3-media-add{flex:none;font-weight:800!important;background:linear-gradient(95deg,#008f87,#4f55c9)!important}.wwh3-media-hint{min-width:0;flex:1;color:#9bc5ca;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.wwh3-media-count{flex:none;padding:3px 7px;border:1px solid #317b83;border-radius:99px;color:#a8f5e8;background:#061720}.wwh3-media-rail{display:flex;gap:7px;overflow-x:auto;padding:2px 1px 5px;scrollbar-width:thin;scrollbar-color:#3ee8d0 #07131d}.wwh3-media-item{position:relative;flex:0 0 92px;height:72px;border:1px solid #245f76;border-radius:8px;background:#040a13;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#739da2;cursor:pointer}.wwh3-media-item img,.wwh3-media-item video{width:100%;height:100%;object-fit:cover}.wwh3-media-item audio{width:84px;height:32px}.wwh3-media-item.is-audio{flex-basis:132px}.wwh3-media-label{position:absolute;left:3px;bottom:3px;right:3px;padding:2px 4px;border-radius:4px;background:#02070bd9;color:#d8ffff;font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.wwh3-x{position:absolute;right:3px;top:3px;width:20px;height:20px;padding:0!important;border-radius:50%!important;background:#8f284e!important;border-color:#ff75a7!important;z-index:2}.wwh3-note{color:#61e4cf;font-size:10px}.wwh3-config-note{padding:9px 11px;border:1px solid #3a7890;border-radius:8px;background:linear-gradient(90deg,#082a34,#171c46);color:#aeece5}
+.wwh3-mv-timeline{display:flex;flex-direction:column;gap:8px;padding:9px;border:1px solid #286d83;border-radius:10px;background:linear-gradient(135deg,#061521,#10122a);overflow-x:auto;overscroll-behavior:contain}.wwh3-mv-timeline[hidden]{display:none}.wwh3-mv-track{display:grid;grid-template-columns:76px minmax(0,1fr);gap:8px;align-items:stretch}.wwh3-mv-track-label{position:sticky;z-index:8;left:0;display:flex;flex-direction:column;justify-content:center;padding:7px;border-right:1px solid #31516d;background:#081726;color:#bffbf1}.wwh3-mv-track-label b{font-size:11px}.wwh3-mv-track-label small{font-size:8px;color:#769ba9}.wwh3-mv-track-content{display:flex;min-width:0;min-height:68px;border:1px solid #285a72;border-radius:8px;background:#030c17;overflow:hidden}.wwh3-mv-clip{position:relative;min-width:0;overflow:visible;border-right:1px solid #4b7f96;background:linear-gradient(145deg,#093440,#18234b)}.wwh3-mv-clip.is-prompt-selected{z-index:4;outline:3px solid #ffb52e;outline-offset:-3px;box-shadow:0 0 0 2px #ff4fd8,0 0 18px #ff4fd899}.wwh3-mv-clip.is-prompt-selected::before{content:"已选";position:absolute;z-index:7;top:4px;right:20px;padding:2px 5px;border-radius:5px;background:linear-gradient(135deg,#ffb52e,#ff4fd8);color:#160718;font-size:9px;font-weight:800;line-height:1.2;box-shadow:0 1px 8px #000b}.wwh3-mv-clip.is-prompt-selected img{opacity:1;filter:saturate(1.12) brightness(1.06)}.wwh3-mv-clip img{width:100%;height:100%;min-height:68px;object-fit:cover;opacity:.78}.wwh3-mv-clip-info{position:absolute;left:4px;right:4px;bottom:4px;display:flex;align-items:center;justify-content:space-between;gap:4px;padding:2px 4px;border-radius:5px;background:#02080ddb;color:#eaffff;font-size:9px}.wwh3-mv-clip-info input{width:52px!important;padding:2px 3px!important;font-size:9px;text-align:right}.wwh3-mv-boundary{position:absolute;z-index:5;right:-5px;top:0;width:10px;height:100%;padding:0!important;border:0!important;border-radius:0!important;background:linear-gradient(90deg,transparent,#5ff5df 45%,#5ff5df 55%,transparent)!important;cursor:ew-resize;touch-action:none}.wwh3-mv-audio{display:flex;align-items:center;gap:8px;width:100%;padding:8px}.wwh3-mv-audio audio{width:100%;height:38px}.wwh3-mv-empty{display:grid;place-items:center;flex:1;color:#698f9c;font-size:10px}.wwh3-mv-total{color:#73ead8;font-size:9px;white-space:nowrap}
+  .wwh3-prompt-editor{position:relative;display:flex;flex-direction:column;gap:4px}.wwh3-prompt-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#a9deda;font-size:11px}.wwh3-prompt-tools{display:flex;align-items:center;gap:6px}.wwh3-clear-prompt,.wwh3-latent-refine{padding:3px 10px!important;min-height:24px;font-size:10px}.wwh3-clear-prompt{border-color:#725173!important;background:linear-gradient(145deg,#32172c,#172345)!important;color:#ffd8ef!important}.wwh3-latent-field{min-width:0}.wwh3-latent-box{display:flex;gap:4px;height:34px}.wwh3-latent-field .wwh3-latent-refine{flex:0 0 60px;white-space:nowrap;border-color:#41698e!important;background:linear-gradient(145deg,#09283a,#202454)!important;color:#bfefff!important}.wwh3-latent-refine.on{border-color:#65ffe1!important;background:linear-gradient(100deg,#087d78,#4056bf)!important;color:#fff!important;box-shadow:0 0 10px #31dcc477}.wwh3-refine-method{display:grid;grid-template-columns:1fr 1fr;flex:1;min-width:0;padding:2px;border:1px solid #334c72;border-radius:7px;background:#050f1e}.wwh3-refine-method button{min-width:0;padding:3px 5px!important;border:0!important;background:transparent!important;color:#7597a9;font-size:9px;white-space:nowrap}.wwh3-refine-method button.on{background:linear-gradient(100deg,#087d78,#4056bf)!important;color:#fff;box-shadow:0 0 7px #31dcc455}.wwh3-refine-method.off{opacity:.48}.wwh3-prompt-refs{display:flex;gap:6px;overflow-x:auto;padding:6px 1px 1px}.wwh3-prompt-refs:empty{display:none}.wwh3-prompt-ref{display:flex;align-items:center;gap:6px;flex:0 0 auto;max-width:180px;padding:4px 7px;border:1px solid #35aa9f;border-radius:8px;background:linear-gradient(110deg,#073039,#171d48);color:#dffff9}.wwh3-prompt-ref img,.wwh3-prompt-ref video{width:30px;height:30px;border-radius:5px;object-fit:cover}.wwh3-prompt-ref b{font-size:10px;white-space:nowrap}.wwh3-mention-picker{position:absolute;left:0;right:0;top:100%;z-index:30;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;max-height:220px;overflow:auto;padding:8px;border:1px solid #57e4d2;border-radius:10px;background:#061323f5;box-shadow:0 12px 30px #000b,0 0 18px #31d7c955}.wwh3-mention-picker[hidden]{display:none}.wwh3-mention-option{display:flex!important;align-items:center!important;justify-content:flex-start!important;gap:8px;min-width:0;padding:6px!important;text-align:left}.wwh3-mention-option img,.wwh3-mention-option video{flex:0 0 46px;width:46px;height:40px;border-radius:6px;object-fit:cover}.wwh3-mention-audio{display:grid;place-items:center;flex:0 0 46px;height:40px;border-radius:6px;background:#112b46;color:#72ffe5;font-size:18px}.wwh3-mention-copy{display:flex;flex-direction:column;min-width:0}.wwh3-mention-copy b{color:#eaffff}.wwh3-mention-copy small{overflow:hidden;color:#8fbfc4;white-space:nowrap;text-overflow:ellipsis}
+  .wwh3 details{flex:none;border:1px solid #285d78;border-radius:9px;overflow:hidden}.wwh3 details[open]{height:auto!important;max-height:none!important}.wwh3 summary{padding:6px 9px;min-height:28px;line-height:15px;cursor:pointer;background:linear-gradient(90deg,#0b3546,#24214e);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.wwh3 details .wwh3-grid{padding:10px}.wwh3-final{height:360px;min-height:320px!important;resize:vertical!important;overflow:auto!important}
+  .wwh3-enhance-head{grid-template-columns:minmax(165px,200px) minmax(190px,240px) minmax(210px,280px) auto}.wwh3-dep-btn{height:34px;white-space:nowrap;align-self:end;background:linear-gradient(145deg,#173451,#3d2867)!important}.wwh3-dep-btn.ok{border-color:#58f3c9!important;color:#9fffe7}.wwh3-dep-btn.bad{border-color:#ff7b9d!important;color:#ffd2df}
+  .wwh3-mv-track{grid-template-columns:64px minmax(0,1fr)}.wwh3-mv-track.is-pictures .wwh3-mv-track-content{height:86px;min-height:86px;max-height:86px}.wwh3-mv-track.is-pictures .wwh3-mv-clip{height:84px;min-height:84px;max-height:84px}.wwh3-mv-track.is-pictures .wwh3-mv-clip img{display:block;height:84px!important;min-height:0!important;max-height:84px!important}.wwh3-mv-track.is-music .wwh3-mv-track-content{height:88px;min-height:88px;max-height:88px}.wwh3-mv-track.is-music .wwh3-mv-audio{position:relative;display:grid;grid-template-rows:52px 25px;gap:2px;height:86px;padding:4px 36px 3px 5px}.wwh3-mv-wave{position:relative;overflow:hidden;border:1px solid #24384b;border-radius:5px;background:#02070d;cursor:crosshair}.wwh3-mv-wave canvas{display:block;width:100%;height:50px}.wwh3-mv-audio-controls{display:flex;align-items:center;gap:8px;color:#99afba}.wwh3-mv-play{display:grid!important;place-items:center;width:23px!important;height:23px;padding:0!important;border-radius:50%!important;background:#f6fbff!important;color:#07101a!important;border-color:#fff!important;font-size:10px}.wwh3-mv-time{font:10px/1.1 Consolas,monospace;color:#8fa6b1}.wwh3-mv-audio>.wwh3-x{position:absolute!important;right:5px!important;top:5px!important}
+  .wwh3-mv-track.is-music .wwh3-mv-audio{width:100%;padding:0;grid-template-rows:58px 26px}.wwh3-mv-track.is-music .wwh3-mv-wave{width:100%;border-radius:7px 7px 2px 2px}.wwh3-mv-track.is-music .wwh3-mv-wave canvas{height:56px}.wwh3-mv-wave.is-committed{box-shadow:inset 0 0 0 1px #52f4dd}.wwh3-mv-audio-controls{display:flex;align-items:center;gap:7px;min-width:0;padding:0 6px;overflow:hidden}.wwh3-mv-cut{flex:0 0 auto!important;display:grid!important;place-items:center;min-width:29px!important;width:29px!important;height:23px!important;padding:0!important;border-color:#65fff0!important;background:linear-gradient(135deg,#0799a1,#7656e5)!important;color:#fff!important;font-size:15px!important;font-weight:700!important;box-shadow:0 0 9px #23ddcb66!important}.wwh3-mv-extra-audio{position:relative;display:grid;grid-template-columns:minmax(180px,1fr) auto auto;align-items:center;gap:5px 8px;width:100%;padding:5px 34px 5px 8px}.wwh3-mv-extra-audio audio{display:none}.wwh3-mv-extra-wave{position:relative;grid-column:1/-1;height:29px;border:1px solid #28465a;border-radius:6px;background:repeating-linear-gradient(90deg,#2878c9 0 2px,transparent 2px 5px),linear-gradient(#071421,#02070d);overflow:hidden}.wwh3-mv-extra-wave.is-committed{border-color:#52f4dd;box-shadow:inset 0 0 10px #1dd9c833}.wwh3-mv-extra-wave.is-committed input{display:none}.wwh3-mv-extra-wave input[type=range]{position:absolute;inset:0;width:100%!important;height:100%!important;margin:0!important;pointer-events:none;background:transparent!important;appearance:none}.wwh3-mv-extra-wave input[type=range]::-webkit-slider-thumb{width:7px;height:29px;border:1px solid #8ffdf0;border-radius:2px;background:#4be6d3;appearance:none;pointer-events:auto;cursor:ew-resize}.wwh3-mv-extra-range{display:flex;align-items:center;gap:4px;color:#a8dcd8;font-size:9px}.wwh3-mv-extra-range input{width:72px!important;padding:3px 5px!important}.wwh3-mv-extra-audio>.wwh3-x{position:absolute!important;right:5px!important;top:5px!important}.wwh3-mv-range{position:absolute;left:4px;top:4px;padding:2px 4px;border-radius:4px;background:#02080dcc;color:#9ff5e8;font:8px/1.1 Consolas,monospace;white-space:nowrap}.wwh3-mv-clip-info b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .wwh3-mv-outside{flex:none;background:#01060b;opacity:.8}
+  .wwh3-mv-continuation{display:grid;place-items:center;min-width:26px;border-left:1px dashed #56d9c8;background:repeating-linear-gradient(135deg,#092733,#092733 7px,#10213b 7px,#10213b 14px);color:#8eeadd;font-size:9px;text-align:center}.wwh3-mv-track-content.is-overflow{box-shadow:inset 0 0 0 2px #ef586c}.wwh3-mv-trim{position:absolute!important;z-index:8;top:0!important;bottom:0!important;width:10px!important;min-width:10px!important;height:100%!important;padding:0!important;border:0!important;border-radius:0!important;transform:translateX(-50%);background:linear-gradient(90deg,transparent 35%,#52f4dd 35%,#52f4dd 65%,transparent 65%)!important;cursor:ew-resize}.wwh3-mv-trim::after{content:"";position:absolute;left:1px;top:1px;width:8px;height:8px;border-radius:2px;background:#52f4dd}.wwh3-mv-selection{min-width:0;overflow:hidden;text-overflow:ellipsis;color:#72e4d4;font:9px/1.1 Consolas,monospace;white-space:nowrap}
+  .wwh3-media-item.is-audio{flex-basis:92px;background:linear-gradient(145deg,#082b39,#18234b)}.wwh3-media-item.is-selected{border-color:#70ffe7;box-shadow:0 0 0 2px #35ead0,0 0 14px #35ead066}.wwh3-media-audio-icon{display:grid;place-items:center;width:44px;height:44px;border:1px solid #42aaad;border-radius:50%;background:linear-gradient(145deg,#0d5961,#4a43a2);color:#eaffff;font-size:23px;box-shadow:0 0 12px #29d8c755}
+  `;
+  document.head.append(style);
+}
+
+function field(node, name, label = name) {
+  const widget = w(node, name);
+  const wrap = document.createElement("label");
+  wrap.append(document.createTextNode(label));
+  let input;
+  const options = values(widget);
+  if (options.length) {
+    input = document.createElement("select");
+    for (const value of options) {
+      const option = document.createElement("option");
+      option.value = option.textContent = value;
+      input.append(option);
+    }
+  } else {
+    input = document.createElement("input");
+    input.type = typeof widget?.value === "boolean" ? "checkbox" : typeof widget?.value === "number" ? "number" : "text";
+    if (input.type === "checkbox") input.checked = Boolean(widget?.value);
+    if (input.type === "number") {
+      const rule = NUMERIC_RULES[name];
+      const minimum = Number(widget?.options?.min ?? rule?.[1]);
+      const maximum = Number(widget?.options?.max ?? rule?.[2]);
+      const step = Number(widget?.options?.step ?? widget?.options?.precision ?? "any");
+      if (Number.isFinite(minimum)) input.min = String(minimum);
+      if (Number.isFinite(maximum)) input.max = String(maximum);
+      input.step = Number.isFinite(step) && step > 0 ? String(step) : "any";
+    }
+  }
+  if (input.type !== "checkbox") input.value = widget?.value ?? "";
+  input.dataset.widgetName = name;
+  const numberValue = () => {
+    const numeric = Number(input.value);
+    if (!Number.isFinite(numeric)) return null;
+    const minimum = input.min === "" ? -Infinity : Number(input.min);
+    const maximum = input.max === "" ? Infinity : Number(input.max);
+    return Math.min(maximum, Math.max(minimum, numeric));
+  };
+  const liveCommit = () => {
+    if (input.type !== "number") {
+      setW(node, name, input.type === "checkbox" ? input.checked : input.value);
+      return;
+    }
+    const raw = input.value.trim();
+    // Keep incomplete numeric text editable (for example `0.`, `-.` or `1e-`).
+    // Rewriting it on every keypress previously made decimal LoRA strengths
+    // impossible to enter because `0.` was immediately changed back to `0`.
+    if (!raw || raw === "-" || raw === "." || raw === "-." || /[eE][+-]?$/.test(raw)) return;
+    const numeric = numberValue();
+    if (numeric === null) return;
+    setW(node, name, numeric);
+    // Preserve normal in-range editing, but still expose hard limits immediately.
+    if (numeric !== Number(raw)) input.value = String(numeric);
+  };
+  const finalCommit = () => {
+    if (input.type !== "number") {
+      liveCommit();
+      return;
+    }
+    const numeric = numberValue();
+    if (numeric === null) {
+      input.value = String(widget?.value ?? "");
+      return;
+    }
+    input.value = String(numeric);
+    setW(node, name, numeric);
+  };
+  input.onchange = finalCommit;
+  // Ctrl+Enter may queue while a numeric field still has focus. `change` only
+  // fires after blur, which previously left the hidden ComfyUI widget at its
+  // old value (commonly 5 seconds). Keep the real widget live as the user types.
+  if (input.type === "number" || input.type === "text") input.oninput = liveCommit;
+  wrap.append(input);
+  return wrap;
+}
+
+const RATIO_LABELS = {
+  "1:1 (Square)": "方形 1:1", "2:3 (Portrait Photo)": "竖幅照片 2:3",
+  "3:2 (Photo)": "横幅照片 3:2", "3:4 (Portrait Standard)": "标准竖屏 3:4",
+  "4:3 (Standard)": "标准横屏 4:3", "9:16 (Portrait Widescreen)": "竖屏 9:16",
+  "16:9 (Widescreen)": "横屏 16:9", "21:9 (Ultrawide)": "超宽屏 21:9",
+};
+const RATIO_NUMBERS = {
+  "1:1 (Square)": [1, 1], "2:3 (Portrait Photo)": [2, 3], "3:2 (Photo)": [3, 2],
+  "3:4 (Portrait Standard)": [3, 4], "4:3 (Standard)": [4, 3],
+  "9:16 (Portrait Widescreen)": [9, 16], "16:9 (Widescreen)": [16, 9], "21:9 (Ultrawide)": [21, 9],
+};
+function outputDimensions(ratio, megapixels, multiple = 32) {
+  const [rw, rh] = RATIO_NUMBERS[ratio] || [16, 9];
+  const scale = Math.sqrt(Number(megapixels) * 1024 * 1024 / (rw * rh));
+  return [Math.max(multiple, Math.round(rw * scale / multiple) * multiple), Math.max(multiple, Math.round(rh * scale / multiple) * multiple)];
+}
+function ratioField(node) {
+  const wrap = field(node, "画面比例", "画面比例");
+  const select = wrap.querySelector("select");
+  for (const option of select?.options || []) option.textContent = RATIO_LABELS[option.value] || option.value;
+  return wrap;
+}
+function resolutionField(node) {
+  const wrap = field(node, "百万像素", "输出分辨率");
+  const select = wrap.querySelector("select");
+  const refresh = () => {
+    const ratio = String(w(node, "画面比例")?.value || "16:9 (Widescreen)");
+    for (const option of select?.options || []) {
+      const [width, height] = outputDimensions(ratio, option.value);
+      option.textContent = `${width} × ${height}（${option.value}MP）`;
+    }
+  };
+  refresh();
+  return { wrap, refresh };
+}
+function storyboardCountField(node) {
+  node.properties ||= {};
+  if (typeof node.properties.wwh3StoryboardAuto !== "boolean") node.properties.wwh3StoryboardAuto = true;
+  const wrap = document.createElement("label");
+  wrap.append(document.createTextNode("分镜数"));
+  const select = document.createElement("select");
+  select.dataset.widgetName = "分镜数显示";
+  const automatic = document.createElement("option");
+  automatic.value = "auto";
+  automatic.textContent = "自动（按时长）";
+  select.append(automatic);
+  for (let count = 1; count <= 12; count += 1) {
+    const option = document.createElement("option");
+    option.value = option.textContent = String(count);
+    select.append(option);
+  }
+  const automaticCount = () => Math.max(1, Math.min(5, Math.ceil(Number(w(node, "时长秒")?.value || 5) / 3)));
+  const refresh = () => {
+    if (node.properties.wwh3StoryboardAuto) {
+      select.value = "auto";
+      setW(node, "分镜数", automaticCount());
+    } else {
+      const count = Math.max(1, Math.min(12, Number(w(node, "分镜数")?.value || 2)));
+      select.value = String(count);
+      setW(node, "分镜数", count);
+    }
+  };
+  select.onchange = () => {
+    node.properties.wwh3StoryboardAuto = select.value === "auto";
+    setW(node, "分镜数", node.properties.wwh3StoryboardAuto ? automaticCount() : Number(select.value));
+  };
+  wrap.append(select);
+  refresh();
+  return { wrap, refresh };
+}
+
+function build(node) {
+  const root = document.createElement("div");
+  root.className = "wwh3";
+
+  const card = () => {
+    const outer = document.createElement("section");
+    outer.className = "wwh3-card";
+    const body = document.createElement("div");
+    body.className = "wwh3-card-body";
+    outer.append(body);
+    root.append(outer);
+    return body;
+  };
+
+  const modelDetails = document.createElement("details");
+  const modelSummary = document.createElement("summary");
+  modelSummary.textContent = "模型、VAE 与 LoRA";
+  const modelGrid = document.createElement("div");
+  modelGrid.className = "wwh3-grid";
+  const modelFileField = (name, label) => {
+    const item = field(node, name, label);
+    item.classList.add("wwh3-model-file");
+    const input = item.querySelector("select,input");
+    if (input) {
+      input.title = String(w(node, name)?.value || "");
+      input.addEventListener("change", () => { input.title = input.value; });
+    }
+    return item;
+  };
+  modelGrid.append(
+    modelFileField("模型", "MiniMax H3 模型"), modelFileField("文本编码器", "文本编码器"),
+    field(node, "视频VAE", "视频 VAE"), field(node, "音频VAE", "音频 VAE"),
+    ...Array.from({length: 6}, (_, offset) => {
+      const index = offset + 1;
+      const row = document.createElement("div");
+      row.style.cssText = "min-width:0;display:grid;grid-template-columns:minmax(0,1fr) 64px;gap:6px;align-items:end";
+      const strength = field(node, `LoRA${index}强度`, "");
+      const input = strength.querySelector("input");
+      if (input) {
+        input.title = `LoRA ${index} 强度`;
+        input.setAttribute("aria-label", `LoRA ${index} 强度`);
+        input.step = "0.05";
+      }
+      row.append(modelFileField(`LoRA${index}`, `LoRA ${index}`), strength);
+      return row;
+    }),
+    field(node, "加速方案", "运行方案"), field(node, "二采放大模型", "二采放大模型"),
+    field(node, "文本编码器设备", "文本编码器设备"), field(node, "模型权重精度", "模型权重精度"),
+    field(node, "视频SigmaShift", "视频 SigmaShift"), field(node, "音频SigmaShift", "音频 SigmaShift"),
+    field(node, "采样器", "采样器"), field(node, "调度器", "调度器"),
+  );
+  modelDetails.append(modelSummary, modelGrid);
+  const modelSection = document.createElement("div");
+  modelSection.className = "wwh3-card wwh3-model-section";
+  modelSection.style.padding = "10px";
+  modelSection.style.display = "flex";
+  modelSection.style.flexDirection = "column";
+  modelSection.style.gap = "9px";
+  let applyingPerformancePreset = false;
+  const manualModelFields = new Set([
+    "模型", "文本编码器", "视频VAE", "音频VAE", "LoRA1", "LoRA1强度", "LoRA2", "LoRA2强度",
+    ...[3, 4, 5, 6].flatMap(index => [`LoRA${index}`, `LoRA${index}强度`]),
+    "采样器", "调度器", "加速方案", "SageAttention", "文本编码器设备", "模型权重精度", "视频SigmaShift", "音频SigmaShift",
+  ]);
+  modelDetails.addEventListener("toggle", () => node.__wwh3?.resizeForContent?.());
+  modelGrid.addEventListener("change", (event) => {
+    const name = event.target?.dataset?.widgetName;
+    if (applyingPerformancePreset || !manualModelFields.has(name)) return;
+    setW(node, "自定义模型配置", true);
+    node.__wwh3PresetKey = "custom";
+    modelSummary.textContent = "自定义模型配置（优选档暂时失效）";
+    speedButtons?.forEach?.((button) => button.classList.remove("on"));
+  });
+  modelSection.append(modelDetails);
+  root.append(modelSection);
+
+  const ideaBody = card();
+  const ideaLabel = document.createElement("div");
+  ideaLabel.className = "wwh3-prompt-editor";
+  const ideaToolbar = document.createElement("div");
+  ideaToolbar.className = "wwh3-prompt-toolbar";
+  const ideaTitle = document.createElement("span");
+  ideaTitle.textContent = "原始创意 / 修改要求";
+  const clearIdea = document.createElement("button");
+  clearIdea.type = "button";
+  clearIdea.className = "wwh3-clear-prompt";
+  clearIdea.textContent = "清空";
+  const promptTools = document.createElement("div");
+  promptTools.className = "wwh3-prompt-tools";
+  const idea = document.createElement("textarea");
+  idea.className = "wwh3-idea";
+  idea.placeholder = "输入创意或修改要求。可使用 @图片1、@视频1、@音频1 引用素材。";
+  idea.value = w(node, "增强源提示词")?.value || w(node, "提示词")?.value || "";
+  const promptReferences = document.createElement("div");
+  promptReferences.className = "wwh3-prompt-refs";
+  const mentionPicker = document.createElement("div");
+  mentionPicker.className = "wwh3-mention-picker";
+  mentionPicker.hidden = true;
+  idea.oninput = () => {
+    const isMultiRefSegment = currentMode() === "多参考" && Boolean(w(node, "多参考连续拼接")?.value)
+      && Number.isInteger(node.__wwh3MultiRefSegmentIndex);
+    if (isMultiRefSegment) {
+      let segments = [];
+      try { segments = JSON.parse(String(w(node, "多参考拼接配置")?.value || "[]")); } catch (_) {}
+      const index = node.__wwh3MultiRefSegmentIndex;
+      if (segments[index]) {
+        segments[index].prompt = idea.value;
+        setW(node, "多参考拼接配置", JSON.stringify(segments));
+        setW(node, "多参考当前分段", index + 1);
+        setW(node, "增强源提示词", idea.value);
+      }
+      return;
+    }
+    const isI2vSegment = currentMode() === "图生视频" && Number.isInteger(node.__wwh3I2vPromptIndex);
+    const isMvSegment = currentMode() === "数字人" && digitalVariant() === "MV数字人"
+      && Number.isInteger(node.__wwh3MvPromptIndex);
+    if (isI2vSegment || isMvSegment) {
+      const promptWidget = isMvSegment ? "MV分段提示词" : "图生分段提示词";
+      const currentWidget = isMvSegment ? "MV当前图片序号" : "图生当前图片序号";
+      const promptIndex = isMvSegment ? node.__wwh3MvPromptIndex : node.__wwh3I2vPromptIndex;
+      let prompts = [];
+      try { prompts = JSON.parse(String(w(node, promptWidget)?.value || "[]")); } catch (_) {}
+      const imageCount = selected(node, "图片").slice(0, 20).length;
+      while (prompts.length < imageCount) prompts.push("");
+      prompts[promptIndex] = idea.value;
+      setW(node, promptWidget, JSON.stringify(prompts));
+      setW(node, currentWidget, promptIndex + 1);
+      setW(node, "增强源提示词", idea.value);
+      return;
+    }
+    setW(node, "增强源提示词", idea.value);
+    if (!Boolean(w(node, "启用提示词增强")?.value)) setW(node, "提示词", idea.value);
+    renderPromptReferences();
+    updateMentionPicker();
+  };
+  idea.onkeydown = (event) => {
+    if (event.key === "Escape") mentionPicker.hidden = true;
+  };
+  idea.onblur = () => setTimeout(() => { mentionPicker.hidden = true; }, 160);
+  clearIdea.onclick = () => {
+    idea.value = "";
+    idea.dispatchEvent(new Event("input", { bubbles: true }));
+    idea.focus();
+  };
+  promptTools.append(clearIdea);
+  ideaToolbar.append(ideaTitle, promptTools);
+  ideaLabel.append(ideaToolbar, idea, promptReferences, mentionPicker);
+  const actions = document.createElement("div");
+  actions.className = "wwh3-actions";
+  const enhance = document.createElement("button");
+  enhance.className = "wwh3-primary";
+  enhance.textContent = "✦ Llama 提示词增强";
+  const useEnhanced = document.createElement("button");
+  useEnhanced.textContent = "采用增强提示词";
+  const useDirect = document.createElement("button");
+  useDirect.textContent = "直接采用原始创意";
+  const status = document.createElement("span");
+  status.className = "wwh3-status";
+  status.textContent = "GGUF 由 Liao2049 内置 Llama 直接加载";
+  actions.append(enhance, useEnhanced, useDirect, status);
+  const progressWrap = document.createElement("div");
+  progressWrap.className = "wwh3-progress";
+  progressWrap.hidden = true;
+  progressWrap.setAttribute("role", "progressbar");
+  progressWrap.setAttribute("aria-valuemin", "0");
+  progressWrap.setAttribute("aria-valuemax", "100");
+  const progressHead = document.createElement("div");
+  progressHead.className = "wwh3-progress-head";
+  const progressText = document.createElement("span");
+  const progressPercent = document.createElement("span");
+  const stopGeneration = document.createElement("button");
+  stopGeneration.type = "button";
+  stopGeneration.textContent = "停止当前任务";
+  stopGeneration.title = "中断正在执行的 ComfyUI 任务；清理队列不会停止当前任务";
+  stopGeneration.style.cssText = "margin-left:auto;padding:2px 9px;border-radius:8px;border:1px solid #e75f72;background:#381625;color:#ffd9df;cursor:pointer;font-size:11px";
+  const progressTrack = document.createElement("div");
+  progressTrack.className = "wwh3-progress-track";
+  const progressBar = document.createElement("div");
+  progressBar.className = "wwh3-progress-bar";
+  progressHead.append(progressText, progressPercent, stopGeneration);
+  progressTrack.append(progressBar);
+  progressWrap.append(progressHead, progressTrack);
+  const samplingPreview = document.createElement("details");
+  samplingPreview.style.cssText = "margin-top:9px;border:1px solid #285d78;border-radius:10px;background:linear-gradient(110deg,#061520,#11142a);overflow:hidden";
+  const previewSummary = document.createElement("summary");
+  previewSummary.style.cssText = "padding:9px 12px;cursor:pointer;color:#a9f1e8;font-size:11px";
+  previewSummary.textContent = "采样预览 · KJ · 点击展开";
+  const previewImage = document.createElement("img");
+  previewImage.alt = "当前采样预览";
+  previewImage.hidden = true;
+  previewImage.style.cssText = "width:100%;height:220px;object-fit:contain;background:#02090f";
+  const previewVideo = document.createElement("video");
+  previewVideo.autoplay = true;
+  previewVideo.loop = true;
+  previewVideo.muted = true;
+  previewVideo.playsInline = true;
+  previewVideo.controls = true;
+  previewVideo.hidden = true;
+  previewVideo.style.cssText = previewImage.style.cssText;
+  let previewObjectUrl = null;
+  const releasePreviewUrl = () => {
+    if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+    previewObjectUrl = null;
+  };
+  const previewEmpty = document.createElement("div");
+  previewEmpty.textContent = "等待采样画面 · 预览仅供观察构图与生成过程";
+  previewEmpty.style.cssText = "padding:28px 12px;text-align:center;color:#7796a8;font-size:11px";
+  samplingPreview.append(previewSummary, previewEmpty, previewImage, previewVideo);
+  samplingPreview.ontoggle = () => requestAnimationFrame(() => node.__wwh3?.resizeForContent?.());
+  const onKjPreview = (event) => {
+    const data = event.detail;
+    if (!root.isConnected || String(data?.node_id) !== String(node.id) || !data.image) return;
+    if (!["image/jpeg", "image/png", "image/webp", "video/mp4"].includes(data.mime)) return;
+    const bytes = Uint8Array.from(atob(data.image), character => character.charCodeAt(0));
+    const nextUrl = URL.createObjectURL(new Blob([bytes], {type:data.mime}));
+    const previousUrl = previewObjectUrl;
+    previewObjectUrl = nextUrl;
+    const isVideo = data.mime === "video/mp4";
+    previewImage.hidden = isVideo;
+    previewVideo.hidden = !isVideo;
+    if (isVideo) {
+      previewVideo.src = nextUrl;
+      previewVideo.play().catch(() => {});
+    } else previewImage.src = nextUrl;
+    if (previousUrl) URL.revokeObjectURL(previousUrl);
+    previewEmpty.hidden = true;
+    previewSummary.textContent = `采样预览 · ${generationProgress.phaseLabel || "正在采样"} · ${data.step ?? "?"}/${data.total ?? "?"}步`;
+  };
+  api.addEventListener("kj_preview_override", onKjPreview);
+  const generationProgress = {
+    active: false, promptId: "", startedAt: 0, sawSamplerProgress: false,
+    phaseTimers: [], phaseLabel: "", phaseBase: null, phaseSpan: null,
+  };
+  let autoRunAfterEnhance = false;
+  const clearPhaseTimers = () => {
+    for (const timer of generationProgress.phaseTimers.splice(0)) clearTimeout(timer);
+  };
+  const schedulePhaseHints = () => {
+    clearPhaseTimers();
+    generationProgress.startedAt = Date.now();
+    generationProgress.sawSamplerProgress = false;
+    generationProgress.phaseLabel = "";
+    generationProgress.phaseBase = null;
+    generationProgress.phaseSpan = null;
+    const hint = (delay, text) => generationProgress.phaseTimers.push(setTimeout(() => {
+      if (!generationProgress.active || generationProgress.sawSamplerProgress) return;
+      paintProgress(NaN, text);
+    }, delay));
+    hint(8000, "正在加载模型和应用加速配置…");
+    hint(25000, "正在编码参考素材与准备音视频 Latent…");
+    hint(60000, "尚未进入采样：高负载电脑可能正在显存换页，可点击停止当前任务");
+    hint(180000, "等待已超过3分钟且仍无采样进度，建议停止并降低分辨率或时长");
+  };
+  const paintProgress = (value, text, state = "running") => {
+    const numeric = Number(value);
+    const determinate = Number.isFinite(numeric);
+    const percent = determinate ? Math.max(0, Math.min(100, Math.round(numeric))) : 0;
+    const becameVisible = progressWrap.hidden;
+    progressWrap.hidden = false;
+    progressWrap.classList.toggle("indeterminate", !determinate && state === "running");
+    progressWrap.classList.toggle("error", state === "error");
+    progressBar.style.width = `${percent}%`;
+    progressText.textContent = text;
+    progressPercent.textContent = determinate ? `${percent}%` : "执行中";
+    progressWrap.setAttribute("aria-valuenow", String(percent));
+    // The progress card is inserted into the normal flow only after execution
+    // starts.  Grow the ComfyUI node at that exact transition so the bottom
+    // controls can never be clipped by the old, pre-run node height.
+    if (becameVisible) requestAnimationFrame(() => node.__wwh3?.resizeForContent?.());
+  };
+  const eventMatches = (detail) => !generationProgress.promptId
+    || !detail?.prompt_id || String(detail.prompt_id) === generationProgress.promptId;
+  const onExecutionStart = (event) => {
+    // Also observe runs started from ComfyUI's top Run/Ctrl+Enter controls,
+    // not only runs submitted by the buttons inside this node.
+    if (!generationProgress.active) {
+      generationProgress.active = true;
+      generationProgress.promptId = String(event.detail?.prompt_id || "");
+    }
+    if (!eventMatches(event.detail)) return;
+    previewSummary.textContent = "采样预览 · 等待本次采样画面";
+    previewVideo.pause();
+    previewVideo.removeAttribute("src");
+    previewVideo.hidden = true;
+    previewImage.removeAttribute("src");
+    releasePreviewUrl();
+    previewImage.hidden = true;
+    previewEmpty.hidden = false;
+    paintProgress(2, "工作流已开始执行");
+    schedulePhaseHints();
+  };
+  const onProgress = (event) => {
+    if (!generationProgress.active || !eventMatches(event.detail)) return;
+    generationProgress.sawSamplerProgress = true;
+    clearPhaseTimers();
+    const value = Number(event.detail?.value);
+    const max = Number(event.detail?.max);
+    const ratio = max > 0 ? value / max : NaN;
+    const staged = Number.isFinite(generationProgress.phaseBase)
+      && Number.isFinite(generationProgress.phaseSpan);
+    const percent = staged && Number.isFinite(ratio)
+      ? generationProgress.phaseBase + ratio * generationProgress.phaseSpan
+      : (Number.isFinite(ratio) ? ratio * 100 : NaN);
+    const phase = generationProgress.phaseLabel || "正在生成";
+    paintProgress(percent, `${phase} · ${value || 0}/${max || "?"}`);
+  };
+  const onH3Phase = (event) => {
+    if (!generationProgress.active) return;
+    const detail = event.detail || {};
+    generationProgress.phaseLabel = String(detail.phase || "处理中");
+    generationProgress.phaseBase = Number(detail.progress);
+    generationProgress.phaseSpan = Number(detail.span);
+    clearPhaseTimers();
+    paintProgress(
+      Number.isFinite(generationProgress.phaseBase) ? generationProgress.phaseBase : NaN,
+      generationProgress.phaseLabel,
+    );
+  };
+  const onExecuting = (event) => {
+    if (!generationProgress.active || !eventMatches(event.detail)) return;
+    const executingNode = event.detail && typeof event.detail === "object" ? event.detail.node : event.detail;
+    if (executingNode == null) {
+      generationProgress.active = false;
+      clearPhaseTimers();
+      paintProgress(100, "生成完成", "done");
+      previewSummary.textContent = "采样预览 · 已完成";
+      status.textContent = "完整工作流生成完成";
+    } else if (!progressWrap.classList.contains("indeterminate") && Number(progressWrap.getAttribute("aria-valuenow")) < 3) {
+      paintProgress(NaN, "模型加载与节点执行中");
+    }
+  };
+  const onExecutionError = (event) => {
+    const wasEnhancing = Boolean(w(node, "仅增强提示词")?.value);
+    if (wasEnhancing) {
+      setW(node, "仅增强提示词", false);
+      enhance.disabled = false;
+      enhance.textContent = "↻ 重新生成增强提示词";
+      status.textContent = "提示词增强失败，可重新运行";
+    }
+    if (autoRunAfterEnhance) {
+      autoRunAfterEnhance = false;
+      enhance.disabled = false;
+      status.textContent = "提示词增强失败，已停止自动生成";
+    }
+    if (!generationProgress.active || !eventMatches(event.detail)) return;
+    generationProgress.active = false;
+    clearPhaseTimers();
+    paintProgress(Number(progressWrap.getAttribute("aria-valuenow")) || 0, "生成失败，请查看错误信息", "error");
+  };
+  const onExecutionInterrupted = (event) => {
+    const wasEnhancing = Boolean(w(node, "仅增强提示词")?.value);
+    setW(node, "仅增强提示词", false);
+    autoRunAfterEnhance = false;
+    enhance.disabled = false;
+    enhance.textContent = "↻ 重新生成增强提示词";
+    if (wasEnhancing) status.textContent = "提示词增强已停止，可重新运行";
+    if (!generationProgress.active || !eventMatches(event.detail)) return;
+    generationProgress.active = false;
+    clearPhaseTimers();
+    paintProgress(Number(progressWrap.getAttribute("aria-valuenow")) || 0, "任务已停止", "error");
+  };
+  stopGeneration.onclick = async () => {
+    if (!generationProgress.active) return void (status.textContent = "当前没有由本节点启动的生成任务");
+    if (!window.confirm("确定停止当前正在运行的任务吗？\n\n清理队列只能清除等待任务；此按钮会请求中断当前执行。若底层正处于CUDA计算或显存换页，中断会在底层返回控制后生效。")) return;
+    stopGeneration.disabled = true;
+    paintProgress(Number(progressWrap.getAttribute("aria-valuenow")) || 0, "已请求停止，正在等待底层安全中断…", "error");
+    status.textContent = "已发送中断请求；请等待当前CUDA调用返回";
+    try {
+      if (typeof api.interrupt === "function") await api.interrupt();
+      else await api.fetchApi("/interrupt", { method: "POST" });
+    } catch (error) {
+      status.textContent = `中断请求失败：${error?.message || error}`;
+    } finally {
+      setTimeout(() => { stopGeneration.disabled = false; }, 1500);
+    }
+  };
+  api.addEventListener("execution_start", onExecutionStart);
+  api.addEventListener("progress", onProgress);
+  api.addEventListener("executing", onExecuting);
+  api.addEventListener("execution_error", onExecutionError);
+  api.addEventListener("execution_interrupted", onExecutionInterrupted);
+  api.addEventListener("minimxa_loop_h3_phase", onH3Phase);
+  const disposeProgressListeners = () => {
+    clearPhaseTimers();
+    api.removeEventListener("execution_start", onExecutionStart);
+    api.removeEventListener("progress", onProgress);
+    api.removeEventListener("executing", onExecuting);
+    api.removeEventListener("execution_error", onExecutionError);
+    api.removeEventListener("execution_interrupted", onExecutionInterrupted);
+    api.removeEventListener("minimxa_loop_h3_phase", onH3Phase);
+    api.removeEventListener("kj_preview_override", onKjPreview);
+    previewVideo.pause();
+    previewVideo.removeAttribute("src");
+    previewImage.removeAttribute("src");
+    releasePreviewUrl();
+    window.removeEventListener("keydown", onCtrlEnter, true);
+  };
+  const finalLabel = document.createElement("label");
+  finalLabel.textContent = "最终 H3 提示词";
+  const finalPrompt = document.createElement("textarea");
+  finalPrompt.className = "wwh3-final";
+  finalPrompt.value = w(node, "提示词")?.value || "";
+  finalPrompt.placeholder = "增强结果会出现在这里，也可以直接编辑。";
+  finalPrompt.oninput = () => setW(node, "提示词", finalPrompt.value);
+  finalPrompt.addEventListener("pointerup", () => requestAnimationFrame(() => node.__wwh3?.resizeForContent?.()));
+  finalLabel.append(finalPrompt);
+  const llamaGrid = document.createElement("div");
+  llamaGrid.className = "wwh3-grid wwh3-llama-grid";
+  const enhanceHead = document.createElement("div");
+  enhanceHead.className = "wwh3-enhance-head";
+  const enhanceSwitch = document.createElement("label");
+  enhanceSwitch.className = "wwh3-switch";
+  enhanceSwitch.append(document.createTextNode("提示词增强"));
+  const enhanceToggle = document.createElement("input");
+  enhanceToggle.type = "checkbox";
+  enhanceToggle.checked = Boolean(w(node, "启用提示词增强")?.value);
+  enhanceToggle.dataset.widgetName = "启用提示词增强";
+  enhanceSwitch.append(enhanceToggle);
+  const serviceField = field(node, "提示词服务", "增强服务");
+  const templateField = field(node, "提示词模板", "提示词模板");
+  const dependencyButton = document.createElement("button");
+  dependencyButton.className = "wwh3-dep-btn";
+  dependencyButton.textContent = "检测依赖";
+  const localModelField = field(node, "Llama模型", "请下载 Llama 模型至 LLM 文件夹");
+  const visionModelField = field(node, "视觉识别模型", "视觉识别模型（mmproj）");
+  const attachModelSelector = (fieldWrap, widgetName) => {
+    const existing = fieldWrap.querySelector("input,select");
+    if (!existing) return null;
+    const select = document.createElement("select");
+    select.dataset.widgetName = widgetName;
+    select.onchange = () => setW(node, widgetName, select.value);
+    existing.replaceWith(select);
+    return {
+      input: select,
+      replaceOptions(names) {
+        const available = Array.from(new Set(names || []));
+        const current = String(w(node, widgetName)?.value || select.value || "");
+        select.replaceChildren(...available.map((name) => {
+          const option = document.createElement("option");
+          option.value = option.textContent = name;
+          return option;
+        }));
+        if (!available.length) {
+          const empty = document.createElement("option");
+          empty.value = "";
+          empty.textContent = "未检测到 GGUF 模型";
+          select.append(empty);
+        }
+        const next = available.includes(current) ? current : (available[0] || "");
+        select.value = next;
+        select.disabled = !available.length;
+        if (next !== current) setW(node, widgetName, next);
+      },
+    };
+  };
+  const localModelSuggestions = attachModelSelector(localModelField, "Llama模型");
+  const visionModelSuggestions = attachModelSelector(visionModelField, "视觉识别模型");
+  let modelRefreshPromise = null;
+  const refreshLlamaModels = () => {
+    if (modelRefreshPromise) return modelRefreshPromise;
+    modelRefreshPromise = api.fetchApi(`/minimxa-loop/dependencies/models/llm?fresh=${Date.now()}`, {
+      cache: "no-store",
+    }).then(async (response) => {
+      const data = await response.json();
+      if (!response.ok || !data?.ok) return;
+    const fill = (target, names) => {
+      if (!target) return;
+      target.replaceOptions(names);
+    };
+    fill(localModelSuggestions, data.models);
+    fill(visionModelSuggestions, data.vision);
+    updateEnhanceUI();
+    }).catch(() => {}).finally(() => { modelRefreshPromise = null; });
+    return modelRefreshPromise;
+  };
+  refreshLlamaModels();
+  localModelSuggestions?.input.addEventListener("focus", refreshLlamaModels);
+  localModelSuggestions?.input.addEventListener("pointerdown", refreshLlamaModels);
+  visionModelSuggestions?.input.addEventListener("focus", refreshLlamaModels);
+  visionModelSuggestions?.input.addEventListener("pointerdown", refreshLlamaModels);
+  const localContextField = field(node, "Llama上下文", "上下文");
+  const compatibleBaseField = field(node, "OpenAI兼容地址", "OpenAI 兼容 API 地址");
+  compatibleBaseField.classList.add("wwh3-field-wide");
+  const compatibleBaseInput = compatibleBaseField.querySelector("input");
+  if (compatibleBaseInput) compatibleBaseInput.placeholder = "例如：http://127.0.0.1:11434/v1";
+  const cloudKeyField = field(node, "云端APIKey", "云端 API Key（本机记忆，不随工作流分享）");
+  const cloudKeyInput = cloudKeyField.querySelector("input");
+  if (cloudKeyInput) {
+    cloudKeyInput.type = "password";
+    cloudKeyInput.autocomplete = "off";
+    const keyStorage = "minimxa.loop.h3.cloudApiKey";
+    try {
+      const saved = localStorage.getItem(keyStorage) || "";
+      if (saved) { cloudKeyInput.value = saved; setW(node, "云端APIKey", saved); }
+    } catch {}
+    const rememberKey = () => {
+      const value = cloudKeyInput.value.trim();
+      try { if (value) localStorage.setItem(keyStorage, value); else localStorage.removeItem(keyStorage); } catch {}
+      setW(node, "云端APIKey", value);
+    };
+    // Capture before the generic field handler can trigger widget/UI refresh.
+    cloudKeyInput.oninput = null;
+    cloudKeyInput.onchange = null;
+    cloudKeyInput.addEventListener("input", rememberKey, true);
+    cloudKeyInput.addEventListener("change", rememberKey, true);
+    cloudKeyInput.addEventListener("blur", rememberKey);
+  }
+  const cloudModelField = field(node, "云端模型", "云端模型（留空自动匹配）");
+  const cloudModelTextInput = cloudModelField.querySelector("input");
+  if (cloudModelTextInput) cloudModelTextInput.placeholder = "填写服务端模型 ID";
+  const apiCheckButton = document.createElement("button");
+  apiCheckButton.className = "wwh3-dep-btn wwh3-api-check-btn";
+  apiCheckButton.textContent = "检测 API 模型";
+  enhanceHead.append(enhanceSwitch, serviceField, templateField, dependencyButton);
+  llamaGrid.append(
+    localModelField, visionModelField, localContextField,
+    compatibleBaseField,
+    cloudKeyField, cloudModelField, apiCheckButton,
+  );
+  ideaBody.append(ideaLabel, enhanceHead, llamaGrid, actions, progressWrap, finalLabel);
+
+  const readDependencyStatus = async () => {
+    const response = await api.fetchApi("/minimxa-loop/dependencies/dependencies");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+    return data;
+  };
+  const paintDependencyStatus = (data) => {
+    const diagnostics = data?.diagnostics || {};
+    dependencyButton.classList.toggle("ok", Boolean(diagnostics.complete));
+    dependencyButton.classList.toggle("bad", !diagnostics.complete && !data?.running);
+    dependencyButton.textContent = data?.running ? `安装中：${data.stage || "处理中"}`
+      : diagnostics.complete ? `依赖完整 · GPU` : "依赖缺失 · 安装";
+    dependencyButton.title = diagnostics.complete
+      ? `llama_cpp ${diagnostics.version || "unknown"}，Qwen3.5 多模态与 GPU offload 可用`
+      : `Python ${diagnostics.python || "unknown"}；需要 llama-cpp-python 0.3.35+、Qwen3.5 多模态处理器与 GPU offload`;
+  };
+  const pollDependencyInstall = async () => {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 1800));
+      const data = await readDependencyStatus();
+      paintDependencyStatus(data);
+      if (!data.running) {
+        dependencyButton.disabled = false;
+        if (!data.diagnostics?.complete) {
+          const tail = (data.log || []).slice(-18).join("\n");
+          window.alert(`Liao-H3 依赖安装未完成：\n${tail || "请查看 ComfyUI 控制台。"}`);
+        } else {
+          window.alert(`依赖安装完成：llama_cpp ${data.diagnostics.version}，Qwen3.5 多模态与 GPU offload 可用。请重启 ComfyUI。`);
+        }
+        return;
+      }
+    }
+  };
+  dependencyButton.onclick = async () => {
+    dependencyButton.disabled = true;
+    dependencyButton.textContent = "检测中…";
+    try {
+      let data = await readDependencyStatus();
+      paintDependencyStatus(data);
+      if (data.running) return void pollDependencyInstall();
+      if (data.diagnostics?.complete) {
+        window.alert(`依赖完整：llama_cpp ${data.diagnostics.version}，Qwen3.5 多模态与 GPU offload 可用。`);
+        dependencyButton.disabled = false;
+        return;
+      }
+      const agreed = window.confirm(
+        `检测到本地 Llama CUDA 依赖不完整。\n\n是否自动识别当前 Python、PyTorch CUDA 与 NVIDIA 环境，并安装匹配的 JamePeng llama-cpp-python Qwen3.5 预编译 GPU 版？\n\n安装器会按 Python、Windows x64 与 CUDA 版本从发布页选择 wheel，并依次尝试 GitHub 与国内代理。找不到匹配轮子时会停止，不会安装 CPU 版、不会源码编译，也不会顺带安装无关依赖。\n\n确认后将修改当前 ComfyUI Python 环境。`
+      );
+      if (!agreed) {
+        dependencyButton.disabled = false;
+        return;
+      }
+      const response = await api.fetchApi("/minimxa-loop/dependencies/dependencies/install", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "INSTALL_LLAMA_GPU" }),
+      });
+      data = await response.json();
+      if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+      paintDependencyStatus(data);
+      await pollDependencyInstall();
+    } catch (error) {
+      dependencyButton.disabled = false;
+      dependencyButton.classList.add("bad");
+      dependencyButton.textContent = "检测失败";
+      window.alert(`依赖检测失败：${error?.message || error}`);
+    }
+  };
+  const cloudErrorText = (data) => {
+    const error = data?.error;
+    const serialized = typeof error === "string" ? error : JSON.stringify(error || {});
+    if (serialized.includes("insufficient_balance") || serialized.includes("1008")) {
+      return data?.key_type === "token_plan_or_coding"
+        ? "余额检测失败：当前很可能是 Token Plan/编程套餐 Key，不能消费按量充值余额。请换用“账户管理 → 接口密钥”创建的普通按量 API Key。"
+        : "MiniMax 返回余额不足（1008）。请确认充值已到账，并确认 Key 属于当前充值账户/Team。";
+    }
+    if (serialized.includes("2049") || serialized.toLowerCase().includes("invalid") || data?.http_status === 401) {
+      return "API Key 无效或与当前接口类型不匹配。";
+    }
+    return `检测失败（HTTP ${data?.http_status || "未知"}）：${serialized.slice(0, 500)}`;
+  };
+  apiCheckButton.onclick = async () => {
+    const provider = String(w(node, "提示词服务")?.value || "");
+    const key = String(cloudKeyInput?.value || w(node, "云端APIKey")?.value || "").trim();
+    const compatibleBase = String(compatibleBaseInput?.value || w(node, "OpenAI兼容地址")?.value || "").trim();
+    const modelInput = llamaGrid.querySelector('[data-widget-name="云端模型"]');
+    const model = String(modelInput?.value || w(node, "云端模型")?.value || "").trim();
+    if (!key && provider !== "OpenAI 兼容 API") return void window.alert("请先填写云端 API Key。");
+    if (provider === "本地 Llama") return void window.alert("请先选择云端 API 服务。");
+    if (provider === "OpenAI 兼容 API" && !compatibleBase) return void window.alert("请先填写 OpenAI 兼容 API 地址。");
+    setW(node, "云端APIKey", key);
+    apiCheckButton.disabled = true;
+    apiCheckButton.textContent = "正在检测…";
+    apiCheckButton.classList.remove("ok", "bad");
+    try {
+      const response = await api.fetchApi("/minimxa-loop/dependencies/api/models/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, api_key: key, model, base_url: compatibleBase }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data?.ok) throw Object.assign(new Error(cloudErrorText(data)), { data });
+      if (modelInput && data.selected) modelInput.value = data.selected;
+      if (data.selected) setW(node, "云端模型", data.selected);
+      apiCheckButton.classList.add("ok");
+      apiCheckButton.textContent = `可用 · ${data.selected}`;
+      apiCheckButton.title = `检测到 ${(data.models || []).length} 个模型：\n${(data.models || []).join("\n")}`;
+      status.textContent = `API 可用，已选择 ${data.selected}`;
+      window.alert(`API 检测通过。\n\n推荐模型：${data.selected}\n可用模型数：${(data.models || []).length}`);
+    } catch (error) {
+      apiCheckButton.classList.add("bad");
+      apiCheckButton.textContent = "检测失败";
+      const message = error?.message || "API 检测失败";
+      status.textContent = message;
+      window.alert(message);
+    } finally {
+      apiCheckButton.disabled = false;
+    }
+  };
+
+  const updateEnhanceUI = () => {
+    const enabled = Boolean(w(node, "启用提示词增强")?.value);
+    const service = String(w(node, "提示词服务")?.value || "本地 Llama");
+    const promptTemplate = String(w(node, "提示词模板")?.value || "自动匹配（按生成模式）");
+    const modeName = Boolean(w(node, "MV数字人")?.value) || Boolean(w(node, "双人数字人")?.value) || Boolean(w(node, "数字人")?.value) ? "数字人"
+      : ["文生视频", "图生视频", "首尾帧", "视频编辑"].find((name) => Boolean(w(node, name)?.value)) || "多参考";
+    const effectiveTemplate = promptTemplate === "自动匹配（按生成模式）"
+      ? modeName === "图生视频" ? "Liao 分镜模板"
+        : modeName === "视频编辑" ? "官方 H3 · Ref2VA 视频编辑"
+          : modeName === "首尾帧" ? "官方 H3 · FL2VA 首尾帧"
+            : modeName === "数字人" ? "官方 H3 · 数字人音频锁定"
+              : modeName === "多参考" ? "官方 H3 · Ref2VA 多参考"
+                : "官方 H3 · T2VA 文生视频"
+      : promptTemplate;
+    const local = service === "本地 Llama";
+    const compatible = service === "OpenAI 兼容 API";
+    llamaGrid.style.display = enabled ? "grid" : "none";
+    localModelField.style.display = enabled && local ? "flex" : "none";
+    visionModelField.style.display = enabled && local ? "flex" : "none";
+    localContextField.style.display = enabled && local ? "flex" : "none";
+    cloudKeyField.style.display = enabled && !local ? "flex" : "none";
+    cloudModelField.style.display = enabled && !local ? "flex" : "none";
+    compatibleBaseField.style.display = enabled && compatible ? "flex" : "none";
+    apiCheckButton.style.display = enabled && !local ? "inline-flex" : "none";
+    const cloudModelInput = llamaGrid.querySelector('[data-widget-name="云端模型"]');
+    if (enabled && cloudModelInput) {
+      const currentCloudModel = String(cloudModelInput.value || "").trim();
+      if (service === "DeepSeek API" && (!currentCloudModel || !currentCloudModel.startsWith("deepseek-"))) {
+        cloudModelInput.value = "deepseek-flash";
+        setW(node, "云端模型", "deepseek-flash");
+      } else if (service === "MiniMax API" && (!currentCloudModel || currentCloudModel.startsWith("deepseek-") || currentCloudModel.includes("自动匹配"))) {
+        cloudModelInput.value = "MiniMax-M2.7";
+        setW(node, "云端模型", "MiniMax-M2.7");
+      } else if (service === "Kimi API" && (!currentCloudModel || currentCloudModel.startsWith("deepseek-") || currentCloudModel.startsWith("MiniMax-"))) {
+        cloudModelInput.value = "自动匹配（优先K3）";
+        setW(node, "云端模型", "自动匹配（优先K3）");
+      } else if (service === "OpenAI 兼容 API" && (currentCloudModel.startsWith("MiniMax-") || currentCloudModel.includes("自动匹配"))) {
+        cloudModelInput.value = "";
+        setW(node, "云端模型", "");
+      }
+    }
+    enhance.textContent = local ? "✦ Llama 提示词增强" : `✦ ${service} 提示词增强`;
+    actions.style.display = enabled ? "flex" : "none";
+    finalLabel.style.display = enabled ? "flex" : "none";
+    if (enabled) {
+      const model = String(w(node, "Llama模型")?.value || "");
+      status.textContent = local
+        ? (model && model !== "未找到GGUF模型" ? `模板：${effectiveTemplate}` : "请下载 Llama 模型至 LLM 文件夹")
+        : `模板：${effectiveTemplate} · ${service}`;
+    }
+    if (!enabled) {
+      setW(node, "仅增强提示词", false);
+      finalPrompt.value = idea.value;
+      setW(node, "提示词", idea.value);
+    }
+    node.__wwh3?.resizeForEnhance?.(enabled);
+  };
+  enhanceToggle.onchange = () => {
+    setW(node, "启用提示词增强", enhanceToggle.checked);
+    if (!enhanceToggle.checked) setW(node, "仅增强提示词", false);
+    if (enhanceToggle.checked) refreshLlamaModels();
+    updateEnhanceUI();
+  };
+  const llamaSelect = llamaGrid.querySelector('[data-widget-name="Llama模型"]');
+  llamaSelect?.addEventListener("change", () => setTimeout(updateEnhanceUI, 0));
+  const serviceSelect = enhanceHead.querySelector('[data-widget-name="提示词服务"]');
+  serviceSelect?.addEventListener("change", () => {
+    const service = String(serviceSelect.value || "本地 Llama");
+    setW(node, "提示词服务", service);
+    const cloudModel = llamaGrid.querySelector('[data-widget-name="云端模型"]');
+    const currentCloudModel = String(cloudModel?.value || "").trim();
+    const isLegacyKimi = ["kimi-k2.5", "k2.5"].includes(currentCloudModel.toLowerCase());
+    if (service !== "本地 Llama" && service !== "OpenAI 兼容 API" && cloudModel && (!currentCloudModel || (service === "Kimi API" && isLegacyKimi))) {
+      cloudModel.value = service === "DeepSeek API" ? "deepseek-flash" : service === "Kimi API" ? "自动匹配（优先K3）" : "MiniMax-M2.7";
+      setW(node, "云端模型", cloudModel.value);
+    } else if (service === "OpenAI 兼容 API" && cloudModel && (currentCloudModel.startsWith("MiniMax-") || currentCloudModel.includes("自动匹配"))) {
+      cloudModel.value = "";
+      setW(node, "云端模型", "");
+    }
+    updateEnhanceUI();
+  });
+  const templateSelect = enhanceHead.querySelector('[data-widget-name="提示词模板"]');
+  if (templateSelect?.value === "Liao 视频编辑模板") {
+    templateSelect.value = "官方 MiniMax H3";
+    setW(node, "提示词模板", "官方 MiniMax H3");
+  }
+  templateSelect?.addEventListener("change", () => {
+    setW(node, "提示词模板", templateSelect.value);
+    updateEnhanceUI();
+  });
+  updateEnhanceUI();
+
+  const continueGeneration = async (prompt, label) => {
+    prompt = String(prompt || "").trim();
+    if (!prompt) return void (status.textContent = label === "增强提示词" ? "请先执行提示词增强" : "请先输入原始创意");
+    syncModeWidgets();
+    finalPrompt.value = prompt;
+    setW(node, "提示词", prompt);
+    setW(node, "仅增强提示词", false);
+    useEnhanced.disabled = true;
+    useDirect.disabled = true;
+    enhance.disabled = true;
+    status.textContent = `已采用${label}，正在提交完整工作流…`;
+    generationProgress.active = true;
+    generationProgress.promptId = "";
+    schedulePhaseHints();
+    paintProgress(NaN, "正在提交生成任务");
+    try {
+      const queued = await app.queuePrompt(0, 1);
+      generationProgress.promptId = String(queued?.prompt_id || queued?.promptId || "");
+      status.textContent = `已采用${label}并开始生成`;
+    } catch (error) {
+      generationProgress.active = false;
+      clearPhaseTimers();
+      paintProgress(0, "生成任务提交失败", "error");
+      status.textContent = `生成提交失败：${error?.message || error}`;
+    } finally {
+      useEnhanced.disabled = false;
+      useDirect.disabled = false;
+      enhance.disabled = false;
+    }
+  };
+  useDirect.onclick = () => continueGeneration(idea.value, "原始创意");
+  useEnhanced.onclick = () => continueGeneration(finalPrompt.value, "增强提示词");
+  enhance.onclick = async () => {
+    if (!idea.value.trim()) return void (status.textContent = "请先输入原始创意");
+    // Prompt-only queueing bypasses the normal full-workflow queue path, so
+    // synchronize the visible mode before serializing the enhancement request.
+    syncModeWidgets();
+    const service = String(w(node, "提示词服务")?.value || "本地 Llama");
+    if (service === "本地 Llama" && (!w(node, "Llama模型")?.value || w(node, "Llama模型")?.value === "未找到GGUF模型")) {
+      return void (status.textContent = "请把 GGUF 放入 ComfyUI/models/LLM 后重启");
+    }
+    setW(node, "增强源提示词", idea.value.trim());
+    const requestSerial = (Number(w(node, "增强请求序号")?.value || 0) + 1) % 2147483647;
+    setW(node, "增强请求序号", requestSerial);
+    setW(node, "仅增强提示词", true);
+    enhance.disabled = true;
+    status.textContent = `${service} 正在理解创意和素材关系…`;
+    try {
+      if (service === "本地 Llama") {
+        await api.queuePrompt(-1, await promptOnly(node.id));
+      } else {
+        setW(node, "仅增强提示词", false);
+        status.textContent = `${service} 独立增强中，不占用视频任务队列…`;
+        const inputs = {};
+        for (const widget of node.widgets || []) {
+          if (widget.name && !widget.name.startsWith("liao2049_")) inputs[widget.name] = widget.value;
+        }
+        const response = await api.fetchApi("/minimxa-loop/h3/cloud-enhance", {
+          method: "POST", headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({inputs}),
+        });
+        if (response.status === 404) throw new Error("请重启 ComfyUI，加载独立云端增强接口");
+        const result = await response.json();
+        if (!response.ok || !result.prompt) throw new Error(result.error || "云端未返回提示词");
+        finalPrompt.value = result.prompt;
+        setW(node, "提示词", result.prompt);
+        enhance.disabled = false;
+        enhance.textContent = "↻ 重新生成增强提示词";
+        status.textContent = "云端增强完成，可编辑或采用增强提示词";
+        node.__wwh3?.resizeForContent?.();
+        if (autoRunAfterEnhance) {
+          autoRunAfterEnhance = false;
+          await continueGeneration(result.prompt, "增强提示词");
+        }
+      }
+    } catch (error) {
+      autoRunAfterEnhance = false;
+      setW(node, "仅增强提示词", false);
+      enhance.disabled = false;
+      status.textContent = `增强失败：${error?.message || error}`;
+    }
+  };
+  const onCtrlEnter = (event) => {
+    if (event.repeat || event.key !== "Enter" || !(event.ctrlKey || event.metaKey)) return;
+    if (!Boolean(w(node, "启用提示词增强")?.value)) return;
+    if (!idea.value.trim()) return;
+    const service = String(w(node, "提示词服务")?.value || "本地 Llama");
+    const llamaReady = service !== "本地 Llama"
+      || (w(node, "Llama模型")?.value && w(node, "Llama模型")?.value !== "未找到GGUF模型");
+    if (!llamaReady || enhance.disabled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    autoRunAfterEnhance = true;
+    status.textContent = `Ctrl+Enter：先由${service}增强，再自动生成…`;
+    enhance.click();
+  };
+  window.addEventListener("keydown", onCtrlEnter, true);
+
+  const settingsBody = card();
+  const mode = document.createElement("div");
+  mode.className = "wwh3-mode";
+      const modes = ["图生视频", "文生视频", "多参考", "首尾帧", "视频编辑", "数字人"];
+  const modeButtons = [];
+  const digitalVariant = () => "MV数字人";
+  const modeFromWidgets = () => Boolean(w(node, "MV数字人")?.value) || Boolean(w(node, "双人数字人")?.value) || Boolean(w(node, "数字人")?.value) ? "数字人"
+    : ["文生视频", "图生视频", "首尾帧", "视频编辑"].find((name) => Boolean(w(node, name)?.value)) || "多参考";
+  node.__wwh3SelectedMode = node.__wwh3SelectedMode || modeFromWidgets();
+  const currentMode = () => node.__wwh3SelectedMode || modeFromWidgets();
+  const syncModeWidgets = () => {
+    const selectedMode = currentMode();
+    for (const option of ["文生视频", "图生视频", "首尾帧", "视频编辑"]) setW(node, option, option === selectedMode);
+    if (selectedMode !== "数字人") {
+      setW(node, "数字人", false);
+      setW(node, "双人数字人", false);
+      setW(node, "MV数字人", false);
+    } else {
+      setW(node, "数字人", false);
+      setW(node, "双人数字人", false);
+      setW(node, "MV数字人", true);
+    }
+  };
+  syncModeWidgets();
+  const autoCorrectPromptTemplate = (modeName = currentMode(), forceAuto = false) => {
+    const current = String(w(node, "提示词模板")?.value || "自动匹配（按生成模式）");
+    const desired = forceAuto ? "自动匹配（按生成模式）" : current;
+    if (desired !== current) setW(node, "提示词模板", desired);
+    const visible = root.querySelector('[data-widget-name="提示词模板"]');
+    if (visible) visible.value = desired;
+    updateEnhanceUI();
+  };
+  const autoCorrectModel = (modeName = currentMode()) => {
+    if (w(node, "启用周期循环")?.value) return String(w(node, "模型")?.value || "");
+    const modelWidget = w(node, "模型");
+    const installed = values(modelWidget).map(String);
+    if (!modelWidget || !installed.length) return "";
+    const lower = (value) => String(value || "").replaceAll("\\", "/").toLowerCase();
+    const current = String(modelWidget.value || "");
+    if (modeName === "视频编辑") return current;
+    const needsFl = ["文生视频", "图生视频", "首尾帧"].includes(modeName);
+    const correctFamily = needsFl ? "minimax_h3_fl2va" : "minimax_h3_ref2va";
+    let chosen = current;
+    if (!lower(current).includes(correctFamily)) {
+      const family = installed.filter((value) => lower(value).includes(correctFamily));
+      chosen = needsFl
+        ? family.find((value) => lower(value).includes("int8_convrot")) || family[0] || ""
+        : family.find((value) => lower(value).includes("int8_convrot") && !lower(value).includes("pruned"))
+          || family.find((value) => lower(value).includes("int8_convrot")) || family[0] || "";
+    }
+    if (!chosen || chosen === current) return current;
+    setW(node, "模型", chosen);
+    const visibleModel = root.querySelector('[data-widget-name="模型"]');
+    if (visibleModel) visibleModel.value = chosen;
+    modelSummary.textContent = `已按${modeName}自动选择：${chosen.split(/[\\/]/).pop()}`;
+    return chosen;
+  };
+    const applyPerformancePreset = (modeName = currentMode(), profile = String(w(node, "视频编辑模式")?.value || "均衡8步")) => {
+    if (w(node, "启用周期循环")?.value) { node.__wwh3PresetKey = `${modeName}|${profile}`; return String(w(node, "模型")?.value || ""); }
+    applyingPerformancePreset = true;
+    setW(node, "自定义模型配置", false);
+    setW(node, "采样步数", profile === "极速4步" ? 4 : profile === "质量20步" ? 20 : 8);
+    try {
+    const modelWidget = w(node, "模型");
+    const installedModels = values(modelWidget).map(String);
+    const lower = (value) => String(value || "").replaceAll("\\", "/").toLowerCase();
+    const compact = (value) => lower(value).replace(/[^a-z0-9]/g, "");
+    const flFamily = ["文生视频", "图生视频", "首尾帧"].includes(modeName)
+      || (modeName === "多参考" && profile === "极速4步");
+    const familyTag = flFamily ? "minimaxh3fl2va" : "minimaxh3ref2va";
+    const h3Models = installedModels.filter((value) => {
+      const name = compact(value);
+      return name.includes("minimaxh3") && (name.includes("fl2va") || name.includes("ref2va"));
+    });
+    const familyModels = h3Models.filter((value) => compact(value).includes(familyTag));
+    const pick = (...predicates) => {
+      for (const predicate of predicates) {
+        const match = familyModels.find((value) => predicate(lower(value)));
+        if (match) return match;
+      }
+      return familyModels[0] || "";
+    };
+    let chosen = "";
+    if (profile === "极速4步") {
+      chosen = pick(
+        (value) => value.includes("kijai_") && value.includes("w4a8_mixed"),
+        (value) => value.includes("w4a8"),
+        (value) => value.includes("int8_convrot"),
+        (value) => value.includes("bf16"),
+      );
+    } else if (profile === "质量20步") {
+      chosen = pick(
+        (value) => value.includes("comfy-org_") && value.includes("bf16"),
+        (value) => value.includes("bf16"),
+        (value) => value.includes("int8_convrot") && !value.includes("pruned"),
+        (value) => value.includes("int8_convrot"),
+        (value) => value.includes("w4a8"),
+      );
+    } else {
+      chosen = pick(
+        (value) => value.includes("int8_convrot") && !value.includes("pruned"),
+        (value) => value.includes("int8_convrot"),
+        (value) => value.includes("w4a8"),
+        (value) => value.includes("bf16"),
+      );
+    }
+    if (["极速4步", "均衡8步"].includes(profile)) chosen = installedModels.find(value => lower(value).endsWith("minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors")) || chosen;
+    if (chosen) setW(node, "模型", chosen);
+    setW(node, "模型权重精度", "default");
+    const loraWidget = w(node, "LoRA1");
+    const installedLoras = values(loraWidget).map(String);
+    let selectedTurbo = "";
+      if (profile === "极速4步" || profile === "均衡8步") {
+        const turbo = pickMinimaxH3TurboLora(installedLoras);
+      selectedTurbo = turbo || "";
+      setW(node, "LoRA1", turbo || "无");
+      setW(node, "LoRA1强度", turbo ? 0.75 : 1.0);
+    } else {
+      setW(node, "LoRA1", "无");
+      setW(node, "LoRA1强度", 1.0);
+    }
+    const nsfw = Boolean(w(node, "NSFW配置")?.value);
+    const nsfwLora = values(w(node, "LoRA2")).find(value => lower(value).endsWith("mysticxxx_mmh3-v2.safetensors"));
+    setW(node, "LoRA2", nsfw && nsfwLora ? nsfwLora : "无");
+    if (nsfw) setW(node, "LoRA2强度", 0.45);
+    const visibleModel = root.querySelector('[data-widget-name="模型"]');
+    if (visibleModel && chosen) visibleModel.value = chosen;
+    for (const name of ["LoRA1", "LoRA1强度", "LoRA2", "LoRA2强度", "模型权重精度"]) {
+      const visible = root.querySelector(`[data-widget-name="${name}"]`);
+      if (visible) visible.value = w(node, name)?.value ?? "";
+    }
+    const familyLabel = flFamily ? "FL2VA" : "Ref2VA";
+    const chosenLower = lower(chosen);
+    const precision = chosenLower.includes("bf16") ? "BF16" : chosenLower.includes("int8") ? "INT8" : chosenLower.includes("w4a8") ? "W4A8" : "已有模型";
+    const label = `${familyLabel} ${precision}${selectedTurbo ? " + LoRA 0.75" : ""}`;
+    modelSummary.textContent = `${modeName === "数字人" ? "数字人对口型" : modeName} ${profile}：${label}${chosen ? ` · ${chosen.split(/[\\/]/).pop()}` : "（未找到匹配模型）"}`;
+    const profileButton = speedButtons?.find?.((button) => button.dataset.profile === profile);
+    const detail = profileButton?.querySelector("small");
+    if (detail) detail.textContent = `${profile.match(/\d+/)?.[0] || ""}步 · ${precision}${selectedTurbo ? " + 加速" : ""}`;
+    node.__wwh3PresetKey = `${modeName}|${profile}`;
+    return chosen;
+    } finally {
+      applyingPerformancePreset = false;
+    }
+  };
+  const selectMode = (name) => {
+    node.__wwh3I2vPromptIndex = null;
+    node.__wwh3MvPromptIndex = null;
+    node.__wwh3MultiRefSegmentIndex = null;
+    setW(node, "图生当前图片序号", 1);
+    setW(node, "MV当前图片序号", 1);
+    setW(node, "多参考当前分段", 1);
+    node.__wwh3SelectedMode = name;
+    for (const option of ["文生视频", "图生视频", "首尾帧", "视频编辑"]) setW(node, option, option === name);
+    if (name === "数字人") {
+      setW(node, "数字人", false);
+      setW(node, "双人数字人", false);
+      setW(node, "MV数字人", true);
+      node.__wwh3MvPromptIndex = 0;
+    } else {
+      setW(node, "数字人", false);
+      setW(node, "双人数字人", false);
+      setW(node, "MV数字人", false);
+    }
+    if (name !== "多参考") setW(node, "多参考连续拼接", false);
+    modeButtons.forEach((button) => button.classList.toggle("on", button.dataset.mode === name));
+    if (!Boolean(w(node, "自定义模型配置")?.value)) {
+      autoCorrectModel(name);
+      applyPerformancePreset(name);
+    }
+    autoCorrectPromptTemplate(name, true);
+    renderMedia();
+  };
+  for (const name of modes) {
+    const button = document.createElement("button");
+    button.dataset.mode = name;
+    button.textContent = name === "数字人" ? "数字人对口型" : name;
+    button.onclick = () => selectMode(name);
+    mode.append(button);
+    modeButtons.push(button);
+  }
+  const multiRefSubmode = document.createElement("div");
+  multiRefSubmode.className = "wwh3-submode wwh3-multi-ref-submode";
+  const multiRefLabelStyle = document.createElement("style");
+  multiRefLabelStyle.textContent = ".wwh3-multi-ref-submode:before{content:'多参考模式'!important}";
+  multiRefSubmode.append(multiRefLabelStyle);
+  const multiRefButtons = [];
+  for (const [label, enabled] of [["普通多参考", false], ["连续拼接", true]]) {
+    const button = document.createElement("button");
+    button.textContent = label;
+    button.onclick = () => {
+      setW(node, "多参考连续拼接", enabled);
+      node.__wwh3MultiRefSegmentIndex = enabled ? 0 : null;
+      setW(node, "多参考当前分段", 1);
+      if (enabled) {
+        let segments = [];
+        try { segments = JSON.parse(String(w(node, "多参考拼接配置")?.value || "[]")); } catch (_) {}
+        if (!Array.isArray(segments) || !segments.length) {
+          segments = [{ duration: Math.max(3, Math.min(15, Number(w(node, "时长秒")?.value || 5))), references: [], prompt: "" }];
+          setW(node, "多参考拼接配置", JSON.stringify(segments));
+        }
+        idea.value = String(segments[0]?.prompt || "");
+        setW(node, "增强源提示词", idea.value);
+        idea.placeholder = "第1段 · 输入本段提示词（实时保存）";
+      }
+      renderMedia();
+    };
+    multiRefSubmode.append(button);
+    multiRefButtons.push([button, enabled]);
+  }
+  const i2vSubmode = document.createElement("div");
+  i2vSubmode.className = "wwh3-submode wwh3-i2v-submode";
+  const i2vLabelStyle = document.createElement("style");
+  i2vLabelStyle.textContent = ".wwh3-i2v-submode:before{content:'图生视频模式'!important}";
+  i2vSubmode.append(i2vLabelStyle);
+  const i2vButtons = [];
+  for (const [label, enabled] of [["单图模式", false], ["连续拼接模式", true]]) {
+    const button = document.createElement("button");
+    button.textContent = label;
+    button.onclick = () => {
+      setW(node, "图生连续拼接", enabled);
+      node.__wwh3I2vPromptIndex = enabled ? 0 : null;
+      setW(node, "图生当前图片序号", 1);
+      if (enabled) {
+        let prompts = [];
+        try { prompts = JSON.parse(String(w(node, "图生分段提示词")?.value || "[]")); } catch (_) {}
+        idea.value = String(prompts[0] || "");
+        setW(node, "增强源提示词", idea.value);
+        idea.placeholder = "图片1 · 输入本段提示词（实时保存）";
+      }
+      if (!enabled) {
+        const images = selected(node, "图片");
+        if (images.length > 1) writeSelected(node, "图片", images.slice(0, 1));
+      }
+      renderMedia();
+    };
+    i2vSubmode.append(button); i2vButtons.push([button, enabled]);
+  }
+  const videoEditSubmode = document.createElement("div");
+  videoEditSubmode.className = "wwh3-submode wwh3-video-edit-tools";
+  const videoEditToolStyle = document.createElement("style");
+  videoEditToolStyle.textContent = ".wwh3-video-edit-tools:before{content:'视频编辑功能'}";
+  videoEditSubmode.append(videoEditToolStyle);
+  const videoEditToolButtons = [];
+  const videoEditPromptDefaults = {
+    "去除字幕": "处理@视频1：仅去除画面中可见的字幕和说明文字，逐帧重建被文字遮挡的背景。完整保留人物、动作、服装、场景、构图、镜头运动、色彩、光线和原视频音频，不裁切画面，不添加新文字。",
+    "动作迁移": "以@图片1中的完整角色为目标主体，让该角色复现@视频1中的全部动作、姿势变化、表情节奏和镜头时序。只参考@视频1的动作与时间结构，不保留源视频人物、服装和身份。需要额外场景时，请上传素材后手动引用对应图片。",
+    "角色替换": "用@图片1中的完整角色替换@视频1里的主要人物。完整采用@图片1人物的脸部、发型、体型和服装；保留@视频1的动作、表情时序、镜头、背景、光线和音频，彻底排除源视频人物及其服装。",
+  };
+  for (const name of ["通用编辑", "去除字幕", "动作迁移", "角色替换"]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = name;
+    button.dataset.tool = name;
+    button.title = name === "动作迁移"
+      ? "图片定义目标主体，视频只提供动作、节奏和镜头时序"
+      : name === "角色替换"
+        ? "只替换视频主角身份，保留原视频服装、动作、背景和音频"
+        : name === "去除字幕"
+          ? "只重建字幕遮挡区域，其余画面与音频保持不变"
+          : "按输入文字执行一般视频编辑";
+    button.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setW(node, "视频编辑功能", name);
+      const defaultPrompt = videoEditPromptDefaults[name];
+      if (defaultPrompt) {
+        // Dedicated edit tools own their verified Ref2VA recipe. A stale
+        // custom-model flag must not bypass model/LoRA selection.
+        setW(node, "自定义模型配置", false);
+        setW(node, "视频编辑模式", "均衡8步");
+        node.__wwh3PresetKey = "";
+        idea.value = defaultPrompt;
+        finalPrompt.value = defaultPrompt;
+        setW(node, "增强源提示词", defaultPrompt);
+        setW(node, "提示词", defaultPrompt);
+        setW(node, "仅增强提示词", false);
+        status.textContent = `${name}提示词已写入，可直接修改后运行`;
+      }
+      renderMedia();
+    };
+    videoEditSubmode.append(button);
+    videoEditToolButtons.push(button);
+  }
+  const videoEditProfile = document.createElement("div");
+  videoEditProfile.className = "wwh3-edit-speed";
+  videoEditProfile.style.gridTemplateColumns = "minmax(112px,.72fr) repeat(4,minmax(0,1fr))";
+  const speedCaption = document.createElement("div");
+  speedCaption.className = "wwh3-speed-caption";
+  speedCaption.innerHTML = "<strong>模型配置</strong><small>按本机模型自动分档</small>";
+  speedCaption.style.cursor = "pointer";
+  speedCaption.title = "点击展开模型、VAE 与 LoRA 选项";
+  speedCaption.onclick = () => {
+    modelDetails.open = true;
+    node.__wwh3?.resizeForContent?.();
+  };
+  videoEditProfile.append(speedCaption);
+  const speedButtons = [];
+  const speedMeta = {
+    "极速4步": ["⚡", "极速", "4步 · DMAD 0.75", "profile-fast"],
+      "均衡8步": ["◐", "均衡", "8步 · DMAD 0.75", "profile-balanced"],
+    "质量20步": ["◆", "质量", "20步 · BF16", "profile-quality"],
+  };
+    for (const name of ["极速4步", "均衡8步", "质量20步"]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    const [icon, title, detail, className] = speedMeta[name];
+    button.className = className;
+    button.innerHTML = `<span class="wwh3-speed-icon">${icon}</span><span class="wwh3-speed-copy"><b>${title}</b><small>${detail}</small></span>`;
+    button.dataset.profile = name;
+    button.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      // Switch the visible state first. Model/LoRA matching must never make
+      // a performance button appear locked when an optional file is missing.
+      setW(node, "SelfLift二采", false);
+      syncSelflift();
+      setW(node, "自定义模型配置", false);
+      speedButtons.forEach((item) => item.classList.toggle("on", item.dataset.profile === name));
+      customSpeed.classList.remove("on");
+      setW(node, "视频编辑模式", name);
+      try {
+        applyPerformancePreset(currentMode(), name);
+      } catch (error) {
+        node.__wwh3PresetKey = `${currentMode()}|${name}`;
+        modelSummary.textContent = `${name} 已选择；模型自动匹配失败：${error?.message || error}`;
+        console.error("[Liao2049 H3] performance preset failed", error);
+      }
+      renderMedia();
+    };
+    videoEditProfile.append(button);
+    speedButtons.push(button);
+  }
+  const customSpeed = document.createElement("div");
+  customSpeed.className = "wwh3-custom-speed";
+  const customSpeedLabel = document.createElement("span");
+  customSpeedLabel.textContent = "自定义";
+  const customSpeedInput = document.createElement("input");
+  customSpeedInput.type = "number";
+  customSpeedInput.min = "1";
+  customSpeedInput.max = "100";
+  customSpeedInput.step = "1";
+  const rememberedCustomSteps = () => {
+    let saved;
+    try { saved = localStorage.getItem("minimxa.loop.h3.customSteps"); } catch {}
+    const value = Number(node.properties?.wwh3CustomSteps ?? saved ?? w(node, "采样步数")?.value ?? 10);
+    return Math.max(1, Math.min(100, Math.round(value || 10)));
+  };
+  customSpeedInput.value = String(rememberedCustomSteps());
+  const customSpeedUnit = document.createElement("small");
+  customSpeedUnit.textContent = "步";
+  const activateCustomSpeed = () => {
+    setW(node, "SelfLift二采", false);
+    syncSelflift();
+    const steps = Math.max(1, Math.min(100, Math.round(Number(customSpeedInput.value) || 10)));
+    customSpeedInput.value = String(steps);
+    node.properties ??= {};
+    node.properties.wwh3CustomSteps = steps;
+    try { localStorage.setItem("minimxa.loop.h3.customSteps", String(steps)); } catch {}
+    setW(node, "采样步数", steps);
+    setW(node, "自定义模型配置", true);
+    node.__wwh3PresetKey = "custom";
+    speedButtons.forEach((button) => button.classList.remove("on"));
+    customSpeed.classList.add("on");
+    modelDetails.open = true;
+    modelSummary.textContent = `自定义模型配置 · ${steps}步（优选档暂时失效）`;
+    node.__wwh3?.resizeForContent?.();
+  };
+  customSpeed.onclick = (event) => { if (event.target !== customSpeedInput) activateCustomSpeed(); };
+  customSpeedInput.onchange = activateCustomSpeed;
+  customSpeedInput.oninput = activateCustomSpeed;
+  customSpeed.append(customSpeedLabel, customSpeedInput, customSpeedUnit);
+  const customControls = document.createElement("div");
+  customControls.style.cssText = "grid-column:1/-1;display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0";
+  customSpeed.style.cssText = "flex:0 0 auto;grid-column:auto;margin:0";
+  customControls.append(customSpeed);
+  videoEditProfile.append(customControls);
+  modelSection.append(videoEditProfile);
+  const extraConfig = document.createElement("div");
+  extraConfig.className = "wwh3-extra-config wwh3-mode";
+  extraConfig.style.cssText = "display:flex;gap:7px;padding:7px;border:1px solid #285d78;border-radius:8px";
+  extraConfig.style.marginTop = "7px";
+  const extraCaption = document.createElement("span");
+  extraCaption.textContent = "其他配置";
+  extraCaption.style.cssText = "align-self:center;margin-right:auto;color:#9ceade";
+  const nsfwButton = document.createElement("button");
+  nsfwButton.type = "button";
+  nsfwButton.textContent = "NSFW";
+  nsfwButton.title = "LoRA2：MysticXXX_MMH3-V2 · 强度 0.45";
+  nsfwButton.onclick = () => {
+    const enabled = !Boolean(w(node, "NSFW配置")?.value);
+    const name = values(w(node, "LoRA2")).find(value => lower(value).endsWith("mysticxxx_mmh3-v2.safetensors"));
+    if (enabled && !name) { window.alert("未找到 MysticXXX_MMH3-V2.safetensors"); return; }
+    setW(node, "NSFW配置", enabled);
+    setW(node, "LoRA2", enabled ? name : "无");
+    if (enabled) setW(node, "LoRA2强度", 0.45);
+    for (const key of ["LoRA2", "LoRA2强度"]) {
+      const input = root.querySelector(`[data-widget-name="${key}"]`);
+      if (input) input.value = w(node, key)?.value;
+    }
+    nsfwButton.classList.toggle("on", enabled);
+    nsfwButton.setAttribute("aria-pressed", String(enabled));
+    node.graph?.setDirtyCanvas(true, true);
+  };
+  const combatButton = document.createElement("button");
+  combatButton.type = "button";
+  combatButton.textContent = "武戏";
+  combatButton.style.cssText = "flex:0 0 auto;white-space:nowrap";
+  combatButton.title = "Combat 0.65 · Repair 0.35 · Fight Flow 0.35 · 速度 LoRA";
+  const combatSpecs = [
+    ["h3_combat_v2.safetensors"], ["motion_repair_v2.safetensors"],
+    ["h3_fight_flow_v1.safetensors"], ["h3_speed_slider_1.1.safetensors", "motion_speed_slider_mmh3_v1.1.safetensors"],
+  ];
+  const combatModels = () => combatSpecs.map(names => names.map(name => values(w(node,"LoRA3")).find(value => lower(value).split("/").pop() === name)).find(Boolean));
+  const speedControl = document.createElement("label");
+  speedControl.style.cssText = "display:flex;flex-direction:row;align-items:center;gap:7px;flex:1;min-width:180px;max-width:330px;margin:0";
+  const speedTitle = document.createElement("span");speedTitle.textContent = "速度";speedTitle.style.cssText="flex:0 0 auto;white-space:nowrap";
+  const speedSlider = document.createElement("input");
+  speedSlider.type="range";speedSlider.min="0";speedSlider.max="10";speedSlider.step="0.1";
+  speedSlider.style.cssText="flex:1;min-width:70px;padding:0;accent-color:#38d7c2";
+  speedSlider.setAttribute("aria-label","武戏速度");
+  speedSlider.title="速度 LoRA 强度：0～10，0 为不施加速度 LoRA，默认 3";
+  const speedValue = document.createElement("span");speedValue.style.minWidth="28px";
+  const syncCombat = () => {
+    const enabled=Boolean(w(node,"武戏配置")?.value);
+    const rawSpeed=Number(w(node,"武戏速度")?.value ?? 3);
+    const speed=Number.isFinite(rawSpeed)?Math.max(0,Math.min(10,rawSpeed)):3;
+    setW(node,"武戏速度",speed);
+    if(enabled)setW(node,"LoRA6强度",speed);
+    combatButton.classList.toggle("on",enabled);combatButton.setAttribute("aria-pressed",String(enabled));
+    speedSlider.value=String(speed);speedValue.textContent=String(speed);speedSlider.disabled=!enabled;
+    speedControl.style.opacity=enabled?"1":"0.45";
+  };
+  const syncCombatFields = () => {
+    for(let index=3;index<=6;index++)for(const key of [`LoRA${index}`,`LoRA${index}强度`]){
+      const input=root.querySelector(`[data-widget-name="${key}"]`);if(input)input.value=w(node,key)?.value ?? "";
+    }
+  };
+  combatButton.onclick=()=>{
+    const enabled=!Boolean(w(node,"武戏配置")?.value);const models=combatModels();
+    if(enabled&&models.some(name=>!name)){window.alert("缺少武戏 LoRA，请检查 Combat、Motion Repair、Fight Flow 和速度 LoRA 文件。");return}
+    node.properties??={};
+    if(enabled){
+      node.properties.liao_combat_lora_restore=[3,4,5,6].map(index=>[w(node,`LoRA${index}`)?.value??"无",w(node,`LoRA${index}强度`)?.value??1]);
+      const strengths=[.65,.35,.35,Number(w(node,"武戏速度")?.value??3)];
+      models.forEach((name,index)=>{setW(node,`LoRA${index+3}`,name);setW(node,`LoRA${index+3}强度`,strengths[index])});
+    }else{
+      const previous=node.properties.liao_combat_lora_restore;
+      models.forEach((name,index)=>{const slot=index+3;if(w(node,`LoRA${slot}`)?.value===name){setW(node,`LoRA${slot}`,previous?.[index]?.[0]??"无");setW(node,`LoRA${slot}强度`,previous?.[index]?.[1]??1)}});
+      delete node.properties.liao_combat_lora_restore;
+    }
+    setW(node,"武戏配置",enabled);syncCombatFields();syncCombat();node.graph?.setDirtyCanvas(true,true);
+  };
+  speedSlider.oninput=()=>{const speed=Number(speedSlider.value);setW(node,"武戏速度",speed);if(w(node,"武戏配置")?.value)setW(node,"LoRA6强度",speed);syncCombatFields();syncCombat();node.graph?.setDirtyCanvas(true,true)};
+  modelGrid.addEventListener("change",event=>{if(event.target?.dataset?.widgetName==="LoRA6强度"&&w(node,"武戏配置")?.value){setW(node,"武戏速度",Number(w(node,"LoRA6强度")?.value));syncCombat()}});
+  speedControl.append(speedTitle,speedSlider,speedValue);
+  extraConfig.style.flexWrap="wrap";
+  extraConfig.append(extraCaption,nsfwButton,combatButton,speedControl);
+  syncCombat();
+
+  extraCaption.hidden = true;
+  extraConfig.style.cssText = "display:flex;align-items:center;gap:7px;flex:1;min-width:0;flex-wrap:wrap;padding:0;margin:0;border:0;border-radius:0;background:none;box-shadow:none";
+  customControls.append(extraConfig);
+  const selfliftButton=document.createElement("button");selfliftButton.type="button";selfliftButton.className="profile-balanced";selfliftButton.innerHTML='<span class="wwh3-speed-icon">◈</span><span class="wwh3-speed-copy"><b>SelfLift 二采</b><small>10步 · 低清6 + 高清4</small></span>';
+  selfliftButton.title="固定 Euler 10步：低清6步 → 放大 → 高清4步。";
+  const syncSelflift=()=>{
+    const unavailable=currentMode()==="数字人";
+    if(unavailable&&Boolean(w(node,"SelfLift二采")?.value)){
+      setW(node,"SelfLift二采",false);
+      setW(node,"视频编辑模式","均衡8步");
+      applyPerformancePreset(currentMode(),"均衡8步");
+    }
+    const enabled=Boolean(w(node,"SelfLift二采")?.value);
+    selfliftButton.disabled=unavailable;
+    selfliftButton.style.opacity=unavailable?"0.35":"1";
+    selfliftButton.style.cursor=unavailable?"not-allowed":"pointer";
+    selfliftButton.title=unavailable?"数字人对口型模式不使用二采，请选择极速、均衡、质量或自定义步数":"固定 Euler 10步：低清6步 → 放大 → 高清4步。";
+    selfliftButton.classList.toggle("on",enabled);
+    selfliftButton.setAttribute("aria-pressed",String(enabled));
+    if(enabled){setW(node,"采样步数",10);speedButtons.forEach(button=>button.classList.remove("on"))}
+  };
+  selfliftButton.onclick=()=>{if(currentMode()==="数字人")return;const enabled=!Boolean(w(node,"SelfLift二采")?.value);applyPerformancePreset(currentMode(),"均衡8步");setW(node,"视频编辑模式","均衡8步");setW(node,"SelfLift二采",enabled);syncSelflift();renderMedia();node.graph?.setDirtyCanvas(true,true)};
+  if (w(node, "注意力机制")?.value === "Comfy Kitchen") setW(node, "注意力机制", "SageAttention");
+  if (w(node, "二采高清分块")?.value == null) setW(node, "二采高清分块", true);
+  const tilingButton = document.createElement("button");
+  tilingButton.type = "button";
+  tilingButton.textContent = "二采高清分块";
+  tilingButton.style.cssText = "flex:0 0 auto;white-space:nowrap";
+  tilingButton.title = "SelfLift 高清阶段分块采样；仅开启二采时生效";
+  const syncTiling = () => {
+    const available = Boolean(w(node, "SelfLift二采")?.value);
+    const enabled = w(node, "二采高清分块")?.value !== false;
+    tilingButton.disabled = !available;
+    tilingButton.style.opacity = available ? "1" : "0.35";
+    tilingButton.classList.toggle("on", available && enabled);
+    tilingButton.setAttribute("aria-pressed", String(available && enabled));
+    tilingButton.title = available ? "SelfLift 高清阶段分块采样" : "开启 SelfLift 二采后可用";
+  };
+  tilingButton.onclick = () => {
+    setW(node, "二采高清分块", w(node, "二采高清分块")?.value === false);
+    syncTiling();
+    node.graph?.setDirtyCanvas(true, true);
+  };
+  syncTiling();
+  extraConfig.append(tilingButton);
+  const attentionField=field(node,"注意力机制","注意力");attentionField.style.cssText="min-width:150px;max-width:210px";
+  attentionField.querySelectorAll("option").forEach(option => {
+    if (option.value === "Comfy Kitchen") option.remove();
+  });
+  videoEditProfile.insertBefore(selfliftButton,speedButtons.find(button=>button.dataset.profile==="质量20步"));
+  extraConfig.append(attentionField);syncSelflift();
+
+
+  const coreGrid = document.createElement("div");
+  coreGrid.className = "wwh3-grid wwh3-core-grid";
+  const ratioControl = ratioField(node);
+  const resolutionControl = resolutionField(node);
+  const durationControl = field(node, "时长秒", "时长（秒）");
+  const storyboardControl = storyboardCountField(node);
+  ratioControl.querySelector("select")?.addEventListener("change", resolutionControl.refresh);
+  const durationInput = durationControl.querySelector("input,select");
+  durationInput?.addEventListener("change", storyboardControl.refresh);
+  const applyDurationToTimeline = () => {
+    const isMv = currentMode() === "数字人" && digitalVariant() === "MV数字人";
+    const isI2vSequence = currentMode() === "图生视频" && Boolean(w(node, "图生连续拼接")?.value);
+    if (!isMv && !isI2vSequence) return;
+    const minimum = isI2vSequence ? 3 : 2;
+    const clipDuration = Math.max(minimum, Math.min(15, Number(w(node, "时长秒")?.value || 5)));
+    const imageCount = selected(node, "图片").slice(0, 20).length;
+    if (imageCount) writeMvDurations(Array(imageCount).fill(clipDuration));
+    renderMvTimeline();
+  };
+  durationInput?.addEventListener("change", applyDurationToTimeline);
+  durationInput?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.currentTarget.blur();
+    applyDurationToTimeline();
+  });
+  coreGrid.append(ratioControl, resolutionControl.wrap, durationControl, storyboardControl.wrap, seedControl(node, field(node, "随机种子", "随机种子")));
+  settingsBody.append(mode, multiRefSubmode, i2vSubmode, videoEditSubmode, coreGrid);
+
+  const mediaBody = card();
+  const note = document.createElement("div");
+  note.className = "wwh3-note";
+  note.textContent = "一个入口混合上传图片、视频和音频；素材按类型自动编号，可同时使用。";
+  const limits = () => {
+    const m = currentMode();
+    if (m === "文生视频") return { 图片: 0, 视频: 0, 音频: 0 };
+    if (m === "图生视频") return { 图片: Boolean(w(node, "图生连续拼接")?.value) ? 20 : 1, 视频: 0, 音频: 0 };
+    if (m === "首尾帧") return { 图片: 2, 视频: 0, 音频: 0 };
+    if (m === "视频编辑") return { 图片: 9, 视频: 3, 音频: 3 };
+    if (m === "数字人" && digitalVariant() === "单人数字人") return { 图片: 1, 视频: 0, 音频: 1 };
+    if (m === "数字人" && digitalVariant() === "双人数字人") return { 图片: 2, 视频: 0, 音频: 2 };
+    if (m === "数字人" && digitalVariant() === "MV数字人") return { 图片: 20, 视频: 0, 音频: 3 };
+    return { 图片: 9, 视频: 3, 音频: 3 };
+  };
+  const toolbar = document.createElement("div");
+  toolbar.className = "wwh3-media-toolbar";
+  const addButton = document.createElement("button");
+  addButton.className = "wwh3-media-add";
+  addButton.textContent = "＋ 上传参考内容";
+  const pasteButton = document.createElement("button");
+  pasteButton.textContent = "▣ 粘贴";
+  pasteButton.title = "粘贴复制的参考图片；也支持 Ctrl+V";
+  pasteButton.style.cssText = "flex:0 0 auto;white-space:nowrap";
+  const hint = document.createElement("span");
+  hint.className = "wwh3-media-hint";
+  hint.textContent = "点击、拖入或 Ctrl+V 粘贴图片 / 视频 / 音频";
+  const count = document.createElement("span");
+  count.className = "wwh3-media-count";
+  const rail = document.createElement("div");
+  rail.className = "wwh3-media-rail";
+  const mvTimeline = document.createElement("div");
+  mvTimeline.className = "wwh3-mv-timeline";
+  mvTimeline.hidden = true;
+  const multiRefTimeline = document.createElement("div");
+  multiRefTimeline.hidden = true;
+  multiRefTimeline.style.cssText = "display:flex;flex-direction:column;gap:8px;padding:9px;border:1px solid #286d83;border-radius:10px;background:linear-gradient(135deg,#061521,#10122a);overflow-x:auto";
+  node.__wwh3MvZoom = Math.max(3, Math.min(48, Number(node.__wwh3MvZoom) || 8));
+  mvTimeline.addEventListener("wheel", (event) => {
+    const blank = event.target === mvTimeline || event.target.classList?.contains("wwh3-mv-track-content") || event.target.classList?.contains("wwh3-mv-outside") || event.target.classList?.contains("wwh3-mv-continuation");
+    if (!event.ctrlKey && !blank) return;
+    event.preventDefault();
+    const oldZoom = node.__wwh3MvZoom;
+    const oldScroll = mvTimeline.scrollLeft;
+    const pointer = Math.max(0, event.clientX - mvTimeline.getBoundingClientRect().left);
+    const timeAtPointer = (oldScroll + pointer) / oldZoom;
+    node.__wwh3MvZoom = Math.max(3, Math.min(48, oldZoom * (event.deltaY < 0 ? 1.14 : 0.88)));
+    renderMvTimeline();
+    requestAnimationFrame(() => {
+      mvTimeline.scrollLeft = Math.max(0, timeAtPointer * node.__wwh3MvZoom - pointer);
+    });
+  }, { passive: false });
+  const picker = document.createElement("input");
+  picker.type = "file";
+  picker.multiple = true;
+  picker.accept = Object.values(MEDIA).map((item) => item.accept).join(",");
+  picker.hidden = true;
+  toolbar.append(addButton, pasteButton, hint, count, picker);
+  mediaBody.append(note, toolbar, rail, mvTimeline, multiRefTimeline);
+
+  const readMvDurations = () => {
+    try {
+      const parsed = JSON.parse(String(w(node, "MV图片时长")?.value || "[]"));
+      return Array.isArray(parsed) ? parsed.map(Number).filter(Number.isFinite) : [];
+    } catch (_) { return []; }
+  };
+  const writeMvDurations = (durations) => {
+    const minimum = currentMode() === "图生视频" && Boolean(w(node, "图生连续拼接")?.value) ? 3 : 2;
+    const clean = durations.map((value) => Math.round(Math.max(minimum, Math.min(15, Number(value) || minimum)) * 10) / 10);
+    setW(node, "MV图片时长", JSON.stringify(clean));
+    return clean;
+  };
+  const balancedMvDurations = (total, count) => {
+    if (!count) return [];
+    const minimum = currentMode() === "图生视频" && Boolean(w(node, "图生连续拼接")?.value) ? 3 : 2;
+    const defaultClip = Math.max(minimum, Math.min(15, Number(w(node, "时长秒")?.value || 5)));
+    return Array(count).fill(Math.round(defaultClip * 10) / 10);
+  };
+  const readAudioTrimConfig = () => {
+    try {
+      const parsed = JSON.parse(String(w(node, "音频剪切配置")?.value || "{}"));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch (_) { return {}; }
+  };
+  const writeAudioTrimConfig = (config) => {
+    setW(node, "音频剪切配置", JSON.stringify(config || {}));
+  };
+  const mvAudioRange = () => {
+    const source = Math.max(0, Number(node.__wwh3MvAudioDuration || 0));
+    const start = Math.max(0, Math.min(Math.max(0, source - 2), Number(w(node, "MV音乐开始秒")?.value || 0)));
+    const requestedEnd = Number(w(node, "MV音乐结束秒")?.value || 0);
+    const end = source > 0 ? Math.max(start + 2, Math.min(source, requestedEnd > start ? requestedEnd : source)) : 0;
+    return { source, start, end, duration: Math.max(0, end - start) };
+  };
+  const resolveMvDurations = (count) => {
+    let durations = readMvDurations();
+    const total = mvAudioRange().duration;
+    durations = durations.slice(0, count).filter((value) => Number.isFinite(value) && value >= 2 && value <= 15);
+    const defaultClip = Math.max(2, Math.min(15, Number(w(node, "时长秒")?.value || 5)));
+    while (durations.length < count) durations.push(defaultClip);
+    durations = writeMvDurations(durations);
+    return durations;
+  };
+  function renderMvTimeline() {
+    const activeMode = currentMode();
+    const isMv = activeMode === "数字人" && digitalVariant() === "MV数字人";
+    const isI2vSequence = activeMode === "图生视频" && Boolean(w(node, "图生连续拼接")?.value);
+    const images = selected(node, "图片").slice(0, 20);
+    const audios = selected(node, "音频").slice(0, 3);
+    // T2V / I2V / FL2V never consume an audio reference.  Old workflows may
+    // still retain a filename in a hidden audio widget after switching modes;
+    // do not let that stale value bring the music editor back into view.
+    // The large waveform editor belongs only to MV production. Multi-reference
+    // audio is a normal selectable reference card beside images/videos.
+    mvTimeline.hidden = !isMv && !isI2vSequence;
+    if (mvTimeline.hidden) return;
+    mvTimeline.replaceChildren();
+    let durations = resolveMvDurations(images.length);
+    const rangeState = mvAudioRange();
+    const trimConfigForTotal = readAudioTrimConfig();
+    node.__wwh3AudioReedit ||= {};
+    const firstAudioCollapsed = Boolean(trimConfigForTotal["1"]?.committed) && !node.__wwh3AudioReedit["1"];
+    const combinedAudioDuration = audios.reduce((sum, _filename, index) => {
+      const slot = String(index + 1);
+      const source = index === 0
+        ? Number(node.__wwh3MvAudioDuration || 0)
+        : Number(node.__wwh3AudioDurations?.[slot] || 0);
+      const saved = trimConfigForTotal[slot];
+      const effective = saved?.committed
+        ? Math.max(0, Math.min(source || Number(saved.end), Number(saved.end)) - Math.max(0, Number(saved.start)))
+        : source;
+      return sum + (Number.isFinite(effective) ? effective : 0);
+    }, 0);
+    const timelineDuration = Math.max(2, combinedAudioDuration || rangeState.duration || durations.reduce((sum, value) => sum + value, 0) || 5);
+    // A committed trim becomes a new zero-based master timeline. While the
+    // user is re-editing we temporarily restore source-file timestamps so both
+    // handles can be positioned against the original waveform.
+    const scaleDuration = firstAudioCollapsed ? timelineDuration : Math.max(timelineDuration, rangeState.source || 0);
+    const timelineOrigin = firstAudioCollapsed ? 0 : rangeState.start;
+    const pixelsPerSecond = Math.max(3, Math.min(48, Number(node.__wwh3MvZoom) || 8));
+    const laneWidth = Math.max(320, Math.ceil(scaleDuration * pixelsPerSecond));
+    // Both lanes must use the exact same time ruler.  Leaving the content
+    // column as `1fr` made it keep the old viewport width after an audio trim,
+    // even though the calculated duration had already changed.
+    const syncTrackWidth = (track, content) => {
+      track.style.gridTemplateColumns = `64px ${laneWidth}px`;
+      track.style.width = `${laneWidth + 72}px`;
+      track.style.minWidth = `${laneWidth + 72}px`;
+      content.style.width = `${laneWidth}px`;
+      content.style.minWidth = `${laneWidth}px`;
+      content.style.maxWidth = `${laneWidth}px`;
+    };
+    const formatMvStamp = (seconds) => {
+      const safe = Math.max(0, Number(seconds) || 0);
+      const minutes = Math.floor(safe / 60);
+      return `${String(minutes).padStart(2, "0")}:${(safe - minutes * 60).toFixed(1).padStart(4, "0")}`;
+    };
+    const pictureTrack = document.createElement("div");
+    pictureTrack.className = "wwh3-mv-track is-pictures";
+    const pictureLabel = document.createElement("div");
+    pictureLabel.className = "wwh3-mv-track-label";
+    pictureLabel.innerHTML = `<b>图片轨道</b><small>拖边界 · 空白滚轮缩放<br>${pixelsPerSecond.toFixed(1)} 像素/秒</small>`;
+    const pictureContent = document.createElement("div");
+    pictureContent.className = "wwh3-mv-track-content";
+    if (!firstAudioCollapsed && rangeState.start > 0 && rangeState.source > 0) {
+      const beforeSelection = document.createElement("div");
+      beforeSelection.className = "wwh3-mv-outside";
+      beforeSelection.style.flex = `0 0 ${rangeState.start * pixelsPerSecond}px`;
+      pictureContent.append(beforeSelection);
+    }
+    if (!images.length) {
+      const empty = document.createElement("div");
+      empty.className = "wwh3-mv-empty";
+      empty.textContent = "请上传图片，可连续添加最多20张";
+      pictureContent.append(empty);
+    }
+    const updateClipDuration = (index, nextDuration) => {
+      if (index < 0 || index >= durations.length) return;
+      durations[index] = Math.max(isI2vSequence ? 3 : 2, Math.min(15, Number(nextDuration) || durations[index]));
+      durations = writeMvDurations(durations);
+      renderMvTimeline();
+    };
+    images.forEach((filename, index) => {
+      const clip = document.createElement("div");
+      clip.className = "wwh3-mv-clip";
+      const isPromptSelected = (isI2vSequence && node.__wwh3I2vPromptIndex === index)
+        || (isMv && node.__wwh3MvPromptIndex === index);
+      clip.classList.toggle("is-prompt-selected", isPromptSelected);
+      clip.style.flex = `0 0 ${Math.max(2, durations[index] || 2) * pixelsPerSecond}px`;
+      const image = document.createElement("img");
+      image.src = mediaUrl(filename);
+      const clipStart = timelineOrigin + durations.slice(0, index).reduce((sum, value) => sum + value, 0);
+      const range = document.createElement("span");
+      range.className = "wwh3-mv-range";
+      range.textContent = `${formatMvStamp(clipStart)}–${formatMvStamp(clipStart + durations[index])}`;
+      const removeImage = document.createElement("button");
+      removeImage.type = "button";
+      removeImage.className = "wwh3-x";
+      removeImage.textContent = "×";
+      removeImage.onclick = (event) => {
+        event.stopPropagation();
+        const list = selected(node, "图片");
+        list.splice(index, 1);
+        writeSelected(node, "图片", list);
+        const nextDurations = durations.slice();
+        nextDurations.splice(index, 1);
+        writeMvDurations(nextDurations);
+        if (isI2vSequence || isMv) {
+          const promptWidget = isMv ? "MV分段提示词" : "图生分段提示词";
+          const currentWidget = isMv ? "MV当前图片序号" : "图生当前图片序号";
+          const indexProperty = isMv ? "__wwh3MvPromptIndex" : "__wwh3I2vPromptIndex";
+          let prompts = [];
+          try { prompts = JSON.parse(String(w(node, promptWidget)?.value || "[]")); } catch (_) {}
+          if (Array.isArray(prompts)) prompts.splice(index, 1);
+          setW(node, promptWidget, JSON.stringify(prompts));
+          const remaining = Math.max(0, list.length);
+          node[indexProperty] = remaining ? Math.min(index, remaining - 1) : null;
+          setW(node, currentWidget, remaining ? node[indexProperty] + 1 : 1);
+          idea.value = remaining ? String(prompts[node[indexProperty]] || "") : "";
+          setW(node, "增强源提示词", idea.value);
+        }
+        renderMedia();
+      };
+      const info = document.createElement("div");
+      info.className = "wwh3-mv-clip-info";
+      const alias = document.createElement("b");
+      alias.textContent = `图片${index + 1}`;
+      const seconds = document.createElement("input");
+      seconds.type = "number";
+      seconds.min = isI2vSequence ? "3" : "2";
+      seconds.max = "15";
+      seconds.step = ".1";
+      seconds.value = String(durations[index] || 0);
+      seconds.title = "该图片在MV中持续的秒数";
+      seconds.onchange = () => {
+        updateClipDuration(index, Number(seconds.value));
+      };
+      const unit = document.createElement("span");
+      unit.textContent = "秒";
+      info.append(alias, seconds, unit);
+      clip.append(image, removeImage, range, info);
+      if (isI2vSequence || isMv) clip.onclick = (event) => {
+        if (event.target.closest("button,input")) return;
+        const promptWidget = isMv ? "MV分段提示词" : "图生分段提示词";
+        const currentWidget = isMv ? "MV当前图片序号" : "图生当前图片序号";
+        let prompts = [];
+        try { prompts = JSON.parse(String(w(node, promptWidget)?.value || "[]")); } catch (_) {}
+        if (isMv) node.__wwh3MvPromptIndex = index;
+        else node.__wwh3I2vPromptIndex = index;
+        // A blank segment must stay blank. Pulling the global/final prompt here
+        // silently made several pictures share one prompt.
+        idea.value = String(prompts[index] || "");
+        setW(node, currentWidget, index + 1);
+        setW(node, "增强源提示词", idea.value);
+        idea.placeholder = isMv
+          ? `图片${index + 1} · 输入本段MV提示词（实时保存，留空则使用全局提示词）`
+          : `图片${index + 1} · 输入本段提示词（实时保存）`;
+        renderMvTimeline();
+        idea.focus();
+      };
+      {
+        const boundary = document.createElement("button");
+        boundary.type = "button";
+        boundary.className = "wwh3-mv-boundary";
+        boundary.title = "左右拖动，只调整当前图片的持续时间（2至15秒）";
+        boundary.onpointerdown = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const startX = event.clientX;
+          const startLeft = durations[index];
+          document.body.style.userSelect = "none";
+          document.body.style.cursor = "ew-resize";
+          const move = (moveEvent) => {
+            const delta = (moveEvent.clientX - startX) / pixelsPerSecond;
+            const value = Math.max(isI2vSequence ? 3 : 2, Math.min(15, startLeft + delta));
+            seconds.value = value.toFixed(1);
+            range.textContent = `${formatMvStamp(clipStart)}–${formatMvStamp(clipStart + value)}`;
+            clip.style.flex = `0 0 ${value * pixelsPerSecond}px`;
+          };
+          const up = (upEvent) => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", up);
+            document.body.style.userSelect = "";
+            document.body.style.cursor = "";
+            const delta = (upEvent.clientX - startX) / pixelsPerSecond;
+            updateClipDuration(index, startLeft + delta);
+          };
+          window.addEventListener("pointermove", move);
+          window.addEventListener("pointerup", up, { once: true });
+        };
+        clip.append(boundary);
+      }
+      pictureContent.append(clip);
+    });
+    const assignedDuration = durations.reduce((sum, value) => sum + value, 0);
+    if (images.length && assignedDuration < timelineDuration - .05) {
+      const continuation = document.createElement("div");
+      continuation.className = "wwh3-mv-continuation";
+      continuation.style.flex = `0 0 ${(timelineDuration - assignedDuration) * pixelsPerSecond}px`;
+      continuation.textContent = `尾帧自动续接 ${(timelineDuration - assignedDuration).toFixed(1)}秒`;
+      pictureContent.append(continuation);
+    }
+    if (!firstAudioCollapsed && rangeState.source > 0 && rangeState.end < rangeState.source) {
+      const afterSelection = document.createElement("div");
+      afterSelection.className = "wwh3-mv-outside";
+      afterSelection.style.flex = `0 0 ${(rangeState.source - rangeState.end) * pixelsPerSecond}px`;
+      pictureContent.append(afterSelection);
+    }
+    if (assignedDuration > timelineDuration + .05) pictureContent.classList.add("is-overflow");
+    pictureTrack.append(pictureLabel, pictureContent);
+    syncTrackWidth(pictureTrack, pictureContent);
+
+    const musicTrack = document.createElement("div");
+    musicTrack.className = "wwh3-mv-track is-music";
+    const musicLabel = document.createElement("div");
+    musicLabel.className = "wwh3-mv-track-label";
+    musicLabel.innerHTML = "<b>音乐轨道</b><small>决定MV总时间线</small>";
+    const musicContent = document.createElement("div");
+    musicContent.className = "wwh3-mv-track-content";
+    if (audios.length) {
+      const audioWrap = document.createElement("div");
+      audioWrap.className = "wwh3-mv-audio";
+      const audio = document.createElement("audio");
+      audio.src = mediaUrl(audios[0]);
+      audio.preload = "metadata";
+      audio.hidden = true;
+      const wave = document.createElement("div");
+      wave.className = "wwh3-mv-wave";
+      const canvas = document.createElement("canvas");
+      const trimStart = document.createElement("button");
+      const trimEnd = document.createElement("button");
+      trimStart.type = trimEnd.type = "button";
+      trimStart.className = "wwh3-mv-trim is-start";
+      trimEnd.className = "wwh3-mv-trim is-end";
+      trimStart.title = "拖动选择音乐开始时间";
+      trimEnd.title = "拖动选择音乐结束时间";
+      wave.append(canvas, trimStart, trimEnd);
+      const controls = document.createElement("div");
+      controls.className = "wwh3-mv-audio-controls";
+      const timeText = document.createElement("span");
+      timeText.className = "wwh3-mv-time";
+      const selectionText = document.createElement("span");
+      selectionText.className = "wwh3-mv-selection";
+      const play = document.createElement("button");
+      play.type = "button";
+      play.className = "wwh3-mv-play";
+      play.textContent = "▶";
+      const formatTime = (seconds) => {
+        const safe = Math.max(0, Number(seconds) || 0);
+        const minutes = Math.floor(safe / 60);
+        const rest = (safe - minutes * 60).toFixed(3).padStart(6, "0");
+        return `${String(minutes).padStart(2, "0")}:${rest}`;
+      };
+      let peaks = [];
+      let animationFrame = 0;
+      node.__wwh3AudioReedit ||= {};
+      const drawWave = () => {
+        const rect = canvas.getBoundingClientRect();
+        const ratio = Math.max(1, window.devicePixelRatio || 1);
+        const width = Math.max(1, Math.round(rect.width * ratio));
+        const height = Math.max(1, Math.round(rect.height * ratio));
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+        }
+        const context = canvas.getContext("2d");
+        context.clearRect(0, 0, width, height);
+        const selected = mvAudioRange();
+        const committed = Boolean(readAudioTrimConfig()["1"]?.committed) && !node.__wwh3AudioReedit["1"];
+        const viewStart = committed ? selected.start : 0;
+        const viewEnd = committed ? selected.end : (audio.duration || selected.end);
+        const viewDuration = Math.max(.001, viewEnd - viewStart);
+        const progress = Math.max(0, Math.min(1, (audio.currentTime - viewStart) / viewDuration));
+        const startFraction = committed ? 0 : (audio.duration > 0 ? selected.start / audio.duration : 0);
+        const endFraction = committed ? 1 : (audio.duration > 0 ? selected.end / audio.duration : 1);
+        const waveformHeight = Math.max(1, height - 12 * ratio);
+        const center = waveformHeight / 2;
+        const bars = Math.max(1, Math.floor(width / (2 * ratio)));
+        context.lineWidth = Math.max(1, ratio);
+        for (let index = 0; index < bars; index++) {
+          const sourceFraction = audio.duration > 0 ? (viewStart + index / bars * viewDuration) / audio.duration : index / bars;
+          const value = peaks.length ? peaks[Math.min(peaks.length - 1, Math.floor(sourceFraction * peaks.length))] : .04;
+          const amplitude = Math.max(1.5 * ratio, value * waveformHeight * .46);
+          context.strokeStyle = index / bars <= progress ? "#318bff" : "#3b3f44";
+          context.beginPath();
+          const x = (index + .5) / bars * width;
+          context.moveTo(x, center - amplitude);
+          context.lineTo(x, center + amplitude);
+          context.stroke();
+        }
+        context.fillStyle = "#02070dbb";
+        context.fillRect(0, 0, startFraction * width, waveformHeight);
+        context.fillRect(endFraction * width, 0, (1 - endFraction) * width, waveformHeight);
+        context.font = `${8 * ratio}px Consolas,monospace`;
+        context.fillStyle = "#6f8792";
+        context.strokeStyle = "#263640";
+        context.lineWidth = Math.max(.5, ratio * .5);
+        for (let tick = 0; tick <= 4; tick++) {
+          const fraction = tick / 4;
+          const x = fraction * width;
+          context.beginPath();
+          context.moveTo(x, 0);
+          context.lineTo(x, waveformHeight);
+          context.stroke();
+          const label = formatTime((committed ? 0 : viewStart) + viewDuration * fraction).slice(0, -2);
+          context.textAlign = tick === 0 ? "left" : tick === 4 ? "right" : "center";
+          context.fillText(label, x, height - 2 * ratio);
+        }
+        const cursorX = progress * width;
+        context.strokeStyle = "#ff263a";
+        context.lineWidth = Math.max(1, ratio);
+        context.beginPath();
+        context.moveTo(cursorX, 0);
+        context.lineTo(cursorX, height);
+        context.stroke();
+        timeText.textContent = committed
+          ? `${formatTime(Math.max(0, audio.currentTime - viewStart))} / ${formatTime(viewDuration)}`
+          : `${formatTime(audio.currentTime)} / ${formatTime(audio.duration)}`;
+        selectionText.textContent = committed
+          ? `仅保留 ${formatTime(selected.start)}–${formatTime(selected.end)}（${selected.duration.toFixed(1)}秒）`
+          : `选择 ${formatTime(selected.start)}–${formatTime(selected.end)}（${selected.duration.toFixed(1)}秒）`;
+        trimStart.style.left = `${startFraction * 100}%`;
+        trimEnd.style.left = `${endFraction * 100}%`;
+        trimStart.hidden = trimEnd.hidden = committed;
+        wave.classList.toggle("is-committed", committed);
+      };
+      const animate = () => {
+        const selected = mvAudioRange();
+        if (!audio.paused && selected.end > selected.start && audio.currentTime >= selected.end) {
+          audio.pause();
+          audio.currentTime = selected.end;
+        }
+        drawWave();
+        if (!audio.paused && !audio.ended) animationFrame = requestAnimationFrame(animate);
+      };
+      play.onclick = async () => {
+        if (audio.paused) {
+          const selected = mvAudioRange();
+          if (audio.currentTime < selected.start || audio.currentTime >= selected.end) audio.currentTime = selected.start;
+          try { await audio.play(); } catch (_) { return; }
+        } else audio.pause();
+      };
+      audio.onplay = () => { play.textContent = "❚❚"; cancelAnimationFrame(animationFrame); animate(); };
+      audio.onpause = () => { play.textContent = "▶"; cancelAnimationFrame(animationFrame); drawWave(); };
+      audio.onended = () => { play.textContent = "▶"; drawWave(); };
+      const cutAudio = document.createElement("button");
+      cutAudio.type = "button";
+      cutAudio.className = "wwh3-mv-cut";
+      cutAudio.textContent = "✂";
+      cutAudio.title = readAudioTrimConfig()["1"]?.committed && !node.__wwh3AudioReedit["1"]
+        ? "重新选择剪切区域" : "保留当前选中区域";
+      cutAudio.onclick = () => {
+        const existing = readAudioTrimConfig()["1"];
+        if (existing?.committed && !node.__wwh3AudioReedit["1"]) {
+          node.__wwh3AudioReedit["1"] = true;
+          setW(node, "MV音乐开始秒", Number(existing.start) || 0);
+          setW(node, "MV音乐结束秒", Number(existing.end) || 0);
+          renderMvTimeline();
+          return;
+        }
+        const selectedRange = mvAudioRange();
+        const next = readAudioTrimConfig();
+        next["1"] = { start: selectedRange.start, end: selectedRange.end, committed: true };
+        writeAudioTrimConfig(next);
+        node.__wwh3AudioReedit["1"] = false;
+        renderMvTimeline();
+        // The retained range is a new zero-based timeline.  Do not leave the
+        // horizontal viewport parked at the old source-file timestamp.
+        requestAnimationFrame(() => { mvTimeline.scrollLeft = 0; });
+      };
+      const seek = (event) => {
+        if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+        const rect = wave.getBoundingClientRect();
+        const selected = mvAudioRange();
+        const committed = Boolean(readAudioTrimConfig()["1"]?.committed);
+        const viewStart = committed ? selected.start : 0;
+        const viewEnd = committed ? selected.end : audio.duration;
+        audio.currentTime = Math.max(viewStart, Math.min(viewEnd, viewStart + (event.clientX - rect.left) / rect.width * (viewEnd - viewStart)));
+        drawWave();
+      };
+      wave.onpointerdown = (event) => {
+        seek(event);
+        const move = (moveEvent) => seek(moveEvent);
+        const up = () => {
+          window.removeEventListener("pointermove", move);
+          window.removeEventListener("pointerup", up);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+      };
+      const bindTrim = (handle, isStart) => {
+        handle.onpointerdown = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const move = (moveEvent) => {
+            if (!Number.isFinite(audio.duration) || audio.duration < 2) return;
+            const rect = wave.getBoundingClientRect();
+            const value = Math.max(0, Math.min(audio.duration, (moveEvent.clientX - rect.left) / rect.width * audio.duration));
+            const current = mvAudioRange();
+            if (isStart) setW(node, "MV音乐开始秒", Math.min(current.end - 2, value));
+            else setW(node, "MV音乐结束秒", Math.max(current.start + 2, value));
+            drawWave();
+          };
+          const up = () => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", up);
+            renderMvTimeline();
+          };
+          window.addEventListener("pointermove", move);
+          window.addEventListener("pointerup", up, { once: true });
+        };
+      };
+      bindTrim(trimStart, true);
+      bindTrim(trimEnd, false);
+      controls.append(timeText, play, cutAudio, selectionText);
+      audio.onloadedmetadata = () => {
+        if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+        const changed = Math.abs(Number(node.__wwh3MvAudioDuration || 0) - audio.duration) > .1;
+        node.__wwh3MvAudioDuration = audio.duration;
+        node.__wwh3AudioDurations ||= {};
+        node.__wwh3AudioDurations["1"] = audio.duration;
+        const existingEnd = Number(w(node, "MV音乐结束秒")?.value || 0);
+        if (existingEnd <= Number(w(node, "MV音乐开始秒")?.value || 0) || existingEnd > audio.duration) {
+          setW(node, "MV音乐结束秒", audio.duration);
+        }
+        drawWave();
+        if (changed) {
+          resolveMvDurations(images.length);
+          requestAnimationFrame(renderMvTimeline);
+        }
+      };
+      audio.onerror = () => {
+        timeText.textContent = "音频预览读取失败";
+        selectionText.textContent = "请重新上传；文件名不要包含连续两个点";
+        console.warn("[Liao MV] audio preview failed", audio.src, audio.error?.message);
+      };
+      fetch(audio.src).then((response) => {
+        if (!response.ok) throw new Error(`音频读取失败 HTTP ${response.status}`);
+        return response.arrayBuffer();
+      }).then(async (buffer) => {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        const audioContext = new AudioCtx();
+        try {
+          const decoded = await audioContext.decodeAudioData(buffer.slice(0));
+          if (decoded.duration > 0 && !(Number(node.__wwh3MvAudioDuration) > 0)) {
+            node.__wwh3MvAudioDuration = decoded.duration;
+            node.__wwh3AudioDurations ||= {};
+            node.__wwh3AudioDurations["1"] = decoded.duration;
+            if (!(Number(w(node, "MV音乐结束秒")?.value) > Number(w(node, "MV音乐开始秒")?.value || 0))) {
+              setW(node, "MV音乐结束秒", decoded.duration);
+            }
+            requestAnimationFrame(renderMvTimeline);
+          }
+          const data = decoded.getChannelData(0);
+          const bucketCount = 640;
+          const bucketSize = Math.max(1, Math.floor(data.length / bucketCount));
+          peaks = Array.from({ length: bucketCount }, (_, index) => {
+            const start = index * bucketSize;
+            const end = Math.min(data.length, start + bucketSize);
+            let peak = 0;
+            for (let offset = start; offset < end; offset += Math.max(1, Math.floor(bucketSize / 64))) {
+              peak = Math.max(peak, Math.abs(data[offset] || 0));
+            }
+            return peak;
+          });
+          drawWave();
+        } finally { audioContext.close?.(); }
+      }).catch((error) => {
+        console.warn("[Liao MV] waveform load failed", audio.src, error);
+        drawWave();
+        if (!(Number(node.__wwh3MvAudioDuration) > 0)) {
+          timeText.textContent = "音频读取失败";
+          selectionText.textContent = error.message || "请重新上传音频";
+        }
+      });
+      audio.load();
+      requestAnimationFrame(drawWave);
+      const removeAudio = document.createElement("button");
+      removeAudio.type = "button";
+      removeAudio.className = "wwh3-x";
+      removeAudio.textContent = "×";
+      removeAudio.onclick = () => {
+        audio.pause();
+        cancelAnimationFrame(animationFrame);
+        const list = selected(node, "音频");
+        list.splice(0, 1);
+        writeSelected(node, "音频", list);
+        node.__wwh3MvAudioDuration = 0;
+        setW(node, "MV音乐开始秒", 0);
+        setW(node, "MV音乐结束秒", 0);
+        writeAudioTrimConfig({});
+        renderMedia();
+      };
+      audioWrap.append(audio, wave, controls, removeAudio);
+      musicContent.append(audioWrap);
+    } else {
+      const empty = document.createElement("div");
+      empty.className = "wwh3-mv-empty";
+      empty.textContent = "请上传一段完整音乐";
+      musicContent.append(empty);
+    }
+    musicTrack.append(musicLabel, musicContent);
+    syncTrackWidth(musicTrack, musicContent);
+    if (isMv || isI2vSequence) mvTimeline.append(pictureTrack);
+    if (!isI2vSequence) mvTimeline.append(musicTrack);
+
+    // Additional clips share the same independent music-track contract. They
+    // are concatenated by the backend in this visible order.
+    audios.slice(1).forEach((filename, extraIndex) => {
+      const slot = extraIndex + 2;
+      const extraTrack = document.createElement("div");
+      extraTrack.className = "wwh3-mv-track is-music";
+      const extraLabel = document.createElement("div");
+      extraLabel.className = "wwh3-mv-track-label";
+      extraLabel.innerHTML = `<b>音乐轨道 ${slot}</b><small>剪切后顺序拼接</small>`;
+      const extraContent = document.createElement("div");
+      extraContent.className = "wwh3-mv-track-content";
+      const panel = document.createElement("div");
+      panel.className = "wwh3-mv-extra-audio";
+      const player = document.createElement("audio");
+      player.src = mediaUrl(filename);
+      player.controls = true;
+      player.preload = "metadata";
+      const startInput = document.createElement("input");
+      const endInput = document.createElement("input");
+      const extraWave = document.createElement("div");
+      extraWave.className = "wwh3-mv-extra-wave";
+      const startSlider = document.createElement("input");
+      const endSlider = document.createElement("input");
+      startSlider.type = endSlider.type = "range";
+      startSlider.min = endSlider.min = "0";
+      startSlider.step = endSlider.step = ".1";
+      extraWave.append(startSlider, endSlider);
+      startInput.type = endInput.type = "number";
+      startInput.min = endInput.min = "0";
+      startInput.step = endInput.step = ".1";
+      const config = readAudioTrimConfig();
+      const saved = config[String(slot)] || {};
+      node.__wwh3AudioReedit ||= {};
+      const extraCommitted = Boolean(saved.committed) && !node.__wwh3AudioReedit[String(slot)];
+      startInput.value = String(Number(saved.start || 0));
+      endInput.value = String(Number(saved.end || 0));
+      startSlider.value = startInput.value;
+      endSlider.value = endInput.value;
+      const cut = document.createElement("button");
+      cut.type = "button";
+      cut.className = "wwh3-mv-cut";
+      cut.textContent = "✂";
+      cut.title = extraCommitted ? "重新选择剪切区域" : "保留当前选中区域";
+      extraWave.classList.toggle("is-committed", extraCommitted);
+      player.onloadedmetadata = () => {
+        node.__wwh3AudioDurations ||= {};
+        node.__wwh3AudioDurations[String(slot)] = player.duration;
+        endInput.max = startInput.max = String(player.duration);
+        startSlider.max = endSlider.max = String(player.duration);
+        if (!(Number(endInput.value) > Number(startInput.value))) endInput.value = player.duration.toFixed(1);
+        startSlider.value = startInput.value;
+        endSlider.value = endInput.value;
+      };
+      const syncExtraRange = (fromSlider) => {
+        const duration = Number.isFinite(player.duration) ? player.duration : Number(endInput.max || endInput.value || 0);
+        let start = Number(fromSlider ? startSlider.value : startInput.value) || 0;
+        let end = Number(fromSlider ? endSlider.value : endInput.value) || duration;
+        start = Math.max(0, Math.min(Math.max(0, end - .05), start));
+        end = Math.max(start + .05, Math.min(duration, end));
+        startInput.value = start.toFixed(1);
+        endInput.value = end.toFixed(1);
+        startSlider.value = String(start);
+        endSlider.value = String(end);
+        cut.textContent = "✂";
+        cut.title = "保留当前选中区域";
+      };
+      startSlider.oninput = endSlider.oninput = () => syncExtraRange(true);
+      startInput.oninput = endInput.oninput = () => syncExtraRange(false);
+      cut.onclick = () => {
+        if (saved.committed && !node.__wwh3AudioReedit[String(slot)]) {
+          node.__wwh3AudioReedit[String(slot)] = true;
+          renderMvTimeline();
+          return;
+        }
+        const duration = Number.isFinite(player.duration) ? player.duration : Number(endInput.value || 0);
+        const start = Math.max(0, Math.min(duration, Number(startInput.value) || 0));
+        const end = Math.max(start + .05, Math.min(duration, Number(endInput.value) || duration));
+        const next = readAudioTrimConfig();
+        next[String(slot)] = { start, end, committed: true };
+        writeAudioTrimConfig(next);
+        node.__wwh3AudioReedit[String(slot)] = false;
+        renderMvTimeline();
+      };
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "wwh3-x";
+      remove.textContent = "×";
+      remove.onclick = () => {
+        const list = selected(node, "音频");
+        list.splice(slot - 1, 1);
+        writeSelected(node, "音频", list);
+        writeAudioTrimConfig({});
+        renderMedia();
+      };
+      const range = document.createElement("span");
+      range.className = "wwh3-mv-extra-range";
+      if (extraCommitted) {
+        range.textContent = `仅保留 ${Number(saved.start).toFixed(1)}–${Number(saved.end).toFixed(1)} 秒（${Math.max(0, Number(saved.end) - Number(saved.start)).toFixed(1)}秒）`;
+      } else {
+        range.append("开始 ", startInput, " 秒　结束 ", endInput, " 秒");
+      }
+      panel.append(player, extraWave, range, cut, remove);
+      extraContent.append(panel);
+      extraTrack.append(extraLabel, extraContent);
+      syncTrackWidth(extraTrack, extraContent);
+      mvTimeline.append(extraTrack);
+    });
+  }
+  const readMultiRefSegments = () => {
+    try {
+      const parsed = JSON.parse(String(w(node, "多参考拼接配置")?.value || "[]"));
+      return Array.isArray(parsed) ? parsed.map((item) => ({
+        duration: Math.max(3, Math.min(15, Number(item?.duration) || Number(w(node, "时长秒")?.value || 5))),
+        references: Array.isArray(item?.references) ? [...new Set(item.references.map((value) => {
+          const clean = String(value).trim().replace(/^@/, "");
+          return clean ? `@${clean}` : "";
+        }).filter(Boolean))] : [],
+        assets: Array.isArray(item?.assets) ? item.assets.map((asset) => ({
+          alias: String(asset?.alias || "").trim().replace(/^@?/, "@"),
+          kind: String(asset?.kind || ""),
+          filename: String(asset?.filename || ""),
+        })).filter((asset) => asset.alias.length > 1 && MEDIA[asset.kind] && asset.filename) : [],
+        prompt: String(item?.prompt || ""),
+      })) : [];
+    } catch (_) { return []; }
+  };
+  const writeMultiRefSegments = (segments) => {
+    if (Array.isArray(segments) && segments.length) {
+      const library = [];
+      const seen = new Set();
+      for (const segment of segments) {
+        for (const asset of segment.assets || []) {
+          if (!asset?.alias || seen.has(asset.alias)) continue;
+          seen.add(asset.alias);
+          library.push(asset);
+        }
+        segment.assets = [];
+      }
+      segments[0].assets = library;
+    }
+    setW(node, "多参考拼接配置", JSON.stringify(segments));
+    return segments;
+  };
+  const allMediaEntries = () => {
+    const caps = limits();
+    const entries = [];
+    const aliases = new Set();
+    for (const kind of Object.keys(MEDIA)) {
+      selected(node, kind).slice(0, caps[kind]).forEach((filename, index) => {
+        const alias = `@${kind}${index + 1}`;
+        entries.push({ kind, index: index + 1, filename, alias });
+        aliases.add(alias);
+      });
+    }
+    for (const segment of readMultiRefSegments()) {
+      for (const asset of segment.assets || []) {
+        if (aliases.has(asset.alias)) continue;
+        const match = asset.alias.match(/(\d+)$/);
+        entries.push({ ...asset, index: match ? Number(match[1]) : entries.length + 1 });
+        aliases.add(asset.alias);
+      }
+    }
+    return entries;
+  };
+  function renderMultiRefTimeline() {
+    const enabled = currentMode() === "多参考" && Boolean(w(node, "多参考连续拼接")?.value);
+    multiRefTimeline.hidden = !enabled;
+    multiRefTimeline.style.display = enabled ? "flex" : "none";
+    if (!enabled) return;
+    const formatSegmentStamp = (seconds) => {
+      const safe = Math.max(0, Number(seconds) || 0);
+      const minutes = Math.floor(safe / 60);
+      return `${String(minutes).padStart(2, "0")}:${(safe - minutes * 60).toFixed(1).padStart(4, "0")}`;
+    };
+    let segments = readMultiRefSegments();
+    if (!segments.length) segments = writeMultiRefSegments([{
+      duration: Math.max(3, Math.min(15, Number(w(node, "时长秒")?.value || 5))), references: [], prompt: "",
+    }]);
+    if (!Number.isInteger(node.__wwh3MultiRefSegmentIndex)) {
+      node.__wwh3MultiRefSegmentIndex = Math.max(0, Math.min(segments.length - 1, Number(w(node, "多参考当前分段")?.value || 1) - 1));
+    }
+    const entries = allMediaEntries();
+    const entryMap = new Map(entries.map((entry) => [entry.alias, entry]));
+    const saveAndRender = () => { writeMultiRefSegments(segments); renderMultiRefTimeline(); };
+    multiRefTimeline.replaceChildren();
+    const tools = document.createElement("div");
+    tools.style.cssText = "display:flex;align-items:center;gap:7px;position:sticky;left:0";
+    const title = document.createElement("b");
+    title.textContent = `连续拼接时间线 · ${segments.length}段 · ${segments.reduce((sum, item) => sum + item.duration, 0).toFixed(1)}秒`;
+    title.style.cssText = "color:#bffbf1;margin-right:auto";
+    const applyAll = document.createElement("button");
+    applyAll.textContent = "应用上方时长到全部";
+    applyAll.onclick = () => {
+      const duration = Math.max(3, Math.min(15, Number(w(node, "时长秒")?.value || 5)));
+      segments.forEach((item) => { item.duration = duration; });
+      saveAndRender();
+    };
+    const add = document.createElement("button");
+    add.textContent = "＋ 添加分段";
+    add.onclick = () => {
+      segments.push({ duration: Math.max(3, Math.min(15, Number(w(node, "时长秒")?.value || 5))), references: [], prompt: "" });
+      node.__wwh3MultiRefSegmentIndex = segments.length - 1;
+      setW(node, "多参考当前分段", segments.length);
+      saveAndRender();
+    };
+    tools.append(title, applyAll, add);
+    const track = document.createElement("div");
+    track.className = "wwh3-mv-track";
+    track.style.cssText = "grid-template-columns:76px auto;min-width:max-content";
+    const trackLabel = document.createElement("div");
+    trackLabel.className = "wwh3-mv-track-label";
+    trackLabel.innerHTML = "<b>分段轨道</b><small>拖边界调时长</small>";
+    const row = document.createElement("div");
+    row.className = "wwh3-mv-track-content";
+    row.style.cssText = "display:flex;height:190px;min-height:190px;min-width:760px;overflow:visible";
+    const pixelsPerSecond = Math.max(30, Math.min(48, Number(node.__wwh3MultiRefZoom) || 36));
+    let clipStart = 0;
+    segments.forEach((segment, index) => {
+      const card = document.createElement("div");
+      card.className = `wwh3-mv-clip${node.__wwh3MultiRefSegmentIndex === index ? " is-prompt-selected" : ""}`;
+      card.style.cssText = `position:relative;display:flex;flex-direction:column;gap:6px;flex:0 0 ${segment.duration * pixelsPerSecond}px;height:188px;min-width:150px;padding:8px;background:linear-gradient(145deg,#093440,#18234b);overflow:visible`;
+      card.ondragover = (event) => { event.preventDefault(); card.style.borderColor = "#70ffe7"; };
+      card.ondragleave = () => { card.style.borderColor = ""; };
+      card.ondrop = async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        card.style.borderColor = "";
+        const alias = event.dataTransfer.getData("application/x-wwh3-reference");
+        if (entryMap.has(alias)) {
+          if (!segment.references.includes(alias)) segment.references.push(alias);
+          saveAndRender();
+          return;
+        }
+        const files = await collectDroppedFiles(event.dataTransfer);
+        if (files.length) await addFiles(files, index);
+      };
+      card.onclick = (event) => {
+        if (event.target.closest("button,input")) return;
+        node.__wwh3MultiRefSegmentIndex = index;
+        setW(node, "多参考当前分段", index + 1);
+        idea.value = segment.prompt || "";
+        setW(node, "增强源提示词", idea.value);
+        idea.placeholder = `第${index + 1}段 · 输入本段提示词（实时保存）`;
+        renderMultiRefTimeline();
+      };
+      const remove = document.createElement("button"); remove.textContent = "×"; remove.disabled = segments.length <= 1;
+      remove.style.cssText = "width:22px;height:22px;padding:0!important";
+      remove.onclick = () => { if (segments.length <= 1) return; segments.splice(index, 1); node.__wwh3MultiRefSegmentIndex = Math.min(index, segments.length - 1); saveAndRender(); };
+      const refs = document.createElement("div");
+      refs.style.cssText = "display:flex;flex-wrap:wrap;align-content:flex-start;gap:6px;height:134px;min-height:134px;padding:5px;border:1px dashed #438196;border-radius:6px;overflow-x:hidden;overflow-y:auto;color:#85b6bd;font-size:10px";
+      if (!segment.references.length) refs.textContent = "拖入本段自己的参考内容";
+      segment.references.forEach((alias) => {
+        const entry = entryMap.get(alias);
+        if (!entry) return;
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.draggable = true;
+        chip.onpointerdown = () => {
+          if (node.__wwh3MultiRefSegmentIndex === index) {
+            node.__wwh3MultiRefCaret = [idea.selectionStart, idea.selectionEnd];
+          }
+        };
+        chip.ondragstart = (event) => {
+          event.stopPropagation();
+          event.dataTransfer.setData("application/x-wwh3-reference", alias);
+          event.dataTransfer.effectAllowed = "copy";
+        };
+        chip.title = `${alias} · ${entry.filename}（点击引用，右上角 × 删除）`;
+        const isMentioned = new Set(String(segment.prompt || "").match(/@(图片|视频|音频)\d+/g) || []).has(alias);
+        chip.style.cssText = `position:relative;flex:0 0 50px;width:50px;height:50px;padding:0!important;border-radius:6px!important;overflow:hidden;background:#06111d!important${isMentioned ? ";border-color:#70ffe7!important;box-shadow:0 0 0 2px #35ead0,0 0 10px #35ead066" : ""}`;
+        const preview = visualPreview(entry);
+        preview.style.cssText = "display:grid;place-items:center;width:100%;height:100%;object-fit:cover;font-size:20px";
+        const badge = document.createElement("span");
+        badge.textContent = alias;
+        badge.style.cssText = "position:absolute;left:2px;bottom:2px;max-width:45px;padding:1px 3px;border-radius:3px;background:#02080ddd;color:#fff;font-size:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+        const close = document.createElement("span");
+        close.textContent = "×";
+        close.style.cssText = "position:absolute;right:2px;top:1px;width:14px;height:14px;border-radius:50%;background:#9b2858;color:#fff;font:11px/14px sans-serif";
+        close.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          segment.references = segment.references.filter((value) => value !== alias);
+          saveAndRender();
+        };
+        chip.append(preview, badge, close);
+        chip.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const switchingSegment = node.__wwh3MultiRefSegmentIndex !== index;
+          node.__wwh3MultiRefSegmentIndex = index;
+          setW(node, "多参考当前分段", index + 1);
+          if (switchingSegment) {
+            idea.value = String(segment.prompt || "");
+            idea.setSelectionRange(idea.value.length, idea.value.length);
+          } else if (Array.isArray(node.__wwh3MultiRefCaret)) {
+            const [start, end] = node.__wwh3MultiRefCaret;
+            idea.setSelectionRange(start, end);
+          }
+          insertReferenceAlias(alias);
+          node.__wwh3MultiRefCaret = [idea.selectionStart, idea.selectionEnd];
+          renderMultiRefTimeline();
+          idea.focus();
+        };
+        refs.append(chip);
+      });
+      const promptState = document.createElement("small");
+      promptState.textContent = segment.prompt ? `提示词：${segment.prompt.slice(0, 28)}` : "点击分段，在下方提示词框编辑本段";
+      promptState.style.cssText = "min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9edbd5";
+      const promptRow = document.createElement("div");
+      promptRow.style.cssText = "display:flex;align-items:center;gap:5px;min-height:22px;padding-right:1px";
+      promptRow.append(promptState, remove);
+      const stamp = document.createElement("span");
+      stamp.className = "wwh3-mv-range";
+      stamp.style.cssText = "top:auto;bottom:3px;left:5px";
+      stamp.textContent = `第${index + 1}段 · ${formatSegmentStamp(clipStart)}–${formatSegmentStamp(clipStart + segment.duration)}`;
+      const boundary = document.createElement("button");
+      boundary.type = "button";
+      boundary.className = "wwh3-mv-boundary";
+      boundary.title = "左右拖动调整本段时长（3至15秒）";
+      boundary.onpointerdown = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const startX = event.clientX;
+        const startDuration = segment.duration;
+        const startAt = clipStart;
+        boundary.setPointerCapture?.(event.pointerId);
+        const move = (moveEvent) => {
+          segment.duration = Math.max(3, Math.min(15, startDuration + (moveEvent.clientX - startX) / pixelsPerSecond));
+          card.style.flexBasis = `${segment.duration * pixelsPerSecond}px`;
+          stamp.textContent = `第${index + 1}段 · ${formatSegmentStamp(startAt)}–${formatSegmentStamp(startAt + segment.duration)}`;
+          title.textContent = `连续拼接时间线 · ${segments.length}段 · ${segments.reduce((sum, item) => sum + item.duration, 0).toFixed(1)}秒`;
+        };
+        const done = () => {
+          boundary.removeEventListener("pointermove", move);
+          boundary.removeEventListener("pointerup", done);
+          boundary.removeEventListener("pointercancel", done);
+          segment.duration = Math.round(segment.duration * 10) / 10;
+          saveAndRender();
+        };
+        boundary.addEventListener("pointermove", move);
+        boundary.addEventListener("pointerup", done);
+        boundary.addEventListener("pointercancel", done);
+      };
+      card.append(refs, promptRow, stamp, boundary);
+      row.append(card);
+      clipStart += segment.duration;
+    });
+    track.append(trackLabel, row);
+    multiRefTimeline.append(tools, track);
+  }
+  function activeMediaEntries() {
+    const caps = limits();
+    const entries = [];
+    for (const kind of Object.keys(MEDIA)) {
+      if (kind === "音频") continue;
+      selected(node, kind).slice(0, caps[kind]).forEach((filename, index) => {
+        entries.push({ kind, index: index + 1, filename, alias: `@${kind}${index + 1}` });
+      });
+    }
+    return entries;
+  }
+  function visualPreview(entry) {
+    if (entry.kind === "图片") {
+      const preview = document.createElement("img");
+      preview.src = mediaUrl(entry.filename);
+      return preview;
+    }
+    if (entry.kind === "视频") {
+      const preview = document.createElement("video");
+      preview.src = mediaUrl(entry.filename);
+      preview.muted = true;
+      preview.preload = "metadata";
+      return preview;
+    }
+    const preview = document.createElement("span");
+    preview.className = "wwh3-mention-audio";
+    preview.textContent = "♫";
+    return preview;
+  }
+  function mentionContext() {
+    const caret = Number.isFinite(idea.selectionStart) ? idea.selectionStart : idea.value.length;
+    const before = idea.value.slice(0, caret);
+    const match = before.match(/@([^\s@]*)$/);
+    return match ? { start: caret - match[0].length, end: caret, query: match[1].toLowerCase() } : null;
+  }
+  function insertReferenceAlias(alias) {
+    const context = mentionContext();
+    const start = context ? context.start : (Number.isFinite(idea.selectionStart) ? idea.selectionStart : idea.value.length);
+    const end = context ? context.end : (Number.isFinite(idea.selectionEnd) ? idea.selectionEnd : start);
+    const before = idea.value.slice(0, start);
+    const spacerBefore = before && !/[\s，。；：、(（]$/.test(before) ? " " : "";
+    idea.setRangeText(`${spacerBefore}${alias} `, start, end, "end");
+    idea.dispatchEvent(new Event("input", { bubbles: true }));
+    mentionPicker.hidden = true;
+    idea.focus();
+  }
+  function renderPromptReferences() {
+    const previousCount = promptReferences.childElementCount;
+    const aliases = new Set(idea.value.match(/@(图片|视频|音频)\d+/g) || []);
+    promptReferences.replaceChildren();
+    for (const entry of activeMediaEntries()) {
+      if (!aliases.has(entry.alias)) continue;
+      const chip = document.createElement("div");
+      chip.className = "wwh3-prompt-ref";
+      chip.title = `${entry.alias} · ${entry.filename.split("/").pop()}`;
+      chip.append(visualPreview(entry));
+      const text = document.createElement("b");
+      text.textContent = entry.alias;
+      chip.append(text);
+      promptReferences.append(chip);
+    }
+    if (previousCount !== promptReferences.childElementCount) {
+      requestAnimationFrame(() => node.__wwh3?.resizeForContent?.());
+    }
+  }
+  function updateMentionPicker() {
+    const context = mentionContext();
+    if (!context) {
+      mentionPicker.hidden = true;
+      return;
+    }
+    const entries = activeMediaEntries().filter((entry) => {
+      const query = context.query;
+      return !query || entry.alias.slice(1).toLowerCase().includes(query) || entry.filename.toLowerCase().includes(query);
+    });
+    mentionPicker.replaceChildren();
+    for (const entry of entries) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "wwh3-mention-option";
+      option.onmousedown = (event) => event.preventDefault();
+      option.onclick = () => insertReferenceAlias(entry.alias);
+      const copy = document.createElement("span");
+      copy.className = "wwh3-mention-copy";
+      const title = document.createElement("b");
+      title.textContent = entry.alias;
+      const filename = document.createElement("small");
+      filename.textContent = entry.filename.split("/").pop();
+      copy.append(title, filename);
+      option.append(visualPreview(entry), copy);
+      mentionPicker.append(option);
+    }
+    mentionPicker.hidden = !entries.length;
+  }
+  const collectDroppedFiles = async (dataTransfer) => {
+    const entries = [...(dataTransfer?.items || [])]
+      .map((item) => item.webkitGetAsEntry?.())
+      .filter(Boolean);
+    if (!entries.length) {
+      const files=[...(dataTransfer?.files||[])];
+      if(files.length)return files;
+      let asset={};
+      try{asset=JSON.parse(dataTransfer?.getData("application/x-comfy-asset-info")||"{}");}catch{}
+      const uri=(dataTransfer?.getData("text/uri-list")||dataTransfer?.getData("text/x-moz-url")||"").split(/\r?\n/).find(line=>line&&!line.startsWith("#"));
+      let source=asset.media_url||uri||asset.preview_url;
+      if(!source&&asset.filename){
+        const query=new URLSearchParams({filename:asset.filename,subfolder:asset.subfolder||"",type:asset.type||"output"});
+        source=api.apiURL(`/view?${query}`);
+      }
+      if(!source)return [];
+      const url=new URL(source,location.href);
+      if(url.origin!==location.origin)throw new Error("?????????????????");
+      const response=await fetch(url.href);
+      if(!response.ok)throw new Error(`???????HTTP ${response.status}`);
+      const blob=await response.blob();
+      const name=asset.filename||asset.display_name||url.searchParams.get("filename")||url.pathname.split("/").pop()||"asset.png";
+      return [new File([blob],name,{type:blob.type})];
+    }
+    const collected = [];
+    const walk = async (entry) => {
+      if (entry.isFile) {
+        const file = await new Promise((resolve) => entry.file(resolve, () => resolve(null)));
+        if (file) collected.push(file);
+        return;
+      }
+      if (!entry.isDirectory) return;
+      const reader = entry.createReader();
+      while (true) {
+        const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
+        if (!batch.length) break;
+        for (const child of batch) await walk(child);
+      }
+    };
+    for (const entry of entries) await walk(entry);
+    return collected;
+  };
+  const addFiles = async (files, targetSegmentIndex = null) => {
+    const stitchMode = currentMode() === "多参考" && Boolean(w(node, "多参考连续拼接")?.value);
+    if (stitchMode) {
+      const segments = readMultiRefSegments();
+      const segmentIndex = Number.isInteger(targetSegmentIndex) ? targetSegmentIndex : null;
+      const target = segmentIndex === null ? null : segments[segmentIndex];
+      if (!segments.length || (segmentIndex !== null && !target)) return;
+      const libraryOwner = segments[0];
+      libraryOwner.assets ||= [];
+      const entries = allMediaEntries();
+      const nextIndex = Object.fromEntries(Object.keys(MEDIA).map((kind) => [kind, Math.max(0, ...entries
+        .filter((entry) => entry.kind === kind)
+        .map((entry) => Number(String(entry.alias).match(/(\d+)$/)?.[1] || 0)))]));
+      for (const file of files) {
+        const kind = inferKind(file);
+        if (!kind) continue;
+        try {
+          const filename = await upload(file);
+          const alias = `@${kind}${++nextIndex[kind]}`;
+          libraryOwner.assets.push({ alias, kind, filename });
+          if (target && !target.references.includes(alias)) target.references.push(alias);
+        } catch (error) { alert(error.message); }
+      }
+      if (target) {
+        node.__wwh3MultiRefSegmentIndex = segmentIndex;
+        setW(node, "多参考当前分段", segmentIndex + 1);
+      }
+      writeMultiRefSegments(segments);
+      renderMedia();
+      return;
+    }
+    const caps = limits();
+    const lists = Object.fromEntries(Object.keys(MEDIA).map((kind) => [kind, selected(node, kind)]));
+    const added = [];
+    for (const file of files) {
+      let kind = inferKind(file);
+      // MV 模式选择视频时，仅把文件放入音乐槽。后端 LoadAudio 只解码
+      // 第一条音轨，不读取或传递视频画面。
+      const useVideoSoundtrack = kind === "视频" && currentMode() === "数字人" && digitalVariant() === "MV数字人";
+      if (useVideoSoundtrack) kind = "音频";
+      if (!kind || !caps[kind]) {
+        alert(`当前模式不支持这个参考文件：${file.name}`);
+        continue;
+      }
+      const replaceSingleAudio = kind === "音频" && currentMode() === "数字人" && digitalVariant() === "单人数字人";
+      if (!replaceSingleAudio && lists[kind].length >= caps[kind]) {
+        alert(`${kind}参考已达到当前模式上限（${caps[kind]}个），请先删除已有素材。`);
+        continue;
+      }
+      try {
+        const filename = await upload(file);
+        if (replaceSingleAudio) lists[kind] = [filename];
+        else lists[kind].push(filename);
+        added.push({ kind, filename });
+      } catch (error) { alert(error.message); }
+    }
+    for (const kind of Object.keys(MEDIA)) writeSelected(node, kind, lists[kind]);
+    if (Number.isInteger(targetSegmentIndex) && added.length) {
+      const segments = readMultiRefSegments();
+      const target = segments[targetSegmentIndex];
+      if (target) {
+        for (const item of added) {
+          const mediaIndex = lists[item.kind].indexOf(item.filename);
+          const alias = mediaIndex >= 0 ? `@${item.kind}${mediaIndex + 1}` : "";
+          if (alias && !target.references.includes(alias)) target.references.push(alias);
+        }
+        node.__wwh3MultiRefSegmentIndex = targetSegmentIndex;
+        setW(node, "多参考当前分段", targetSegmentIndex + 1);
+        writeMultiRefSegments(segments);
+      }
+    }
+    renderMedia();
+  };
+  picker.onchange = () => { addFiles([...picker.files]); picker.value = ""; };
+  addButton.onclick = () => picker.click();
+  pasteButton.onclick = async () => {
+    pasteButton.disabled = true;
+    try {
+      if (!navigator.clipboard?.read) throw new Error("当前浏览器不支持直接读取剪贴板，请在参考区按 Ctrl+V 粘贴。");
+      const items = await navigator.clipboard.read();
+      const files = [];
+      for (const item of items) {
+        const type = item.types.find(type => type.startsWith("image/"));
+        if (!type) continue;
+        const blob = await item.getType(type);
+        const extension = type.split("/")[1].replace("jpeg", "jpg").replace("svg+xml", "svg");
+        files.push(new File([blob], `clipboard-${Date.now()}-${files.length}.${extension}`, { type }));
+      }
+      if (!files.length) throw new Error("剪贴板中没有可粘贴的图片。请先复制图片或截图；复制的本地文件请在参考区按 Ctrl+V。");
+      const targetSegmentIndex = currentMode() === "多参考" && Boolean(w(node, "多参考连续拼接")?.value)
+        ? Math.max(0, Number(node.__wwh3MultiRefSegmentIndex) || 0) : null;
+      await addFiles(files, targetSegmentIndex);
+    } catch (error) {
+      alert(error.name === "NotAllowedError" ? "无法读取剪贴板，请允许浏览器访问剪贴板，或在参考区按 Ctrl+V 粘贴。" : error.message);
+    } finally {
+      pasteButton.disabled = false;
+    }
+  };
+  toolbar.onclick = (event) => { if (event.target === toolbar || event.target === hint) picker.click(); };
+  toolbar.ondragover = (event) => { event.preventDefault(); toolbar.classList.add("drag"); };
+  toolbar.ondragleave = () => toolbar.classList.remove("drag");
+  toolbar.ondrop = async (event) => { event.preventDefault(); event.stopPropagation(); toolbar.classList.remove("drag"); try { await addFiles(await collectDroppedFiles(event.dataTransfer)); } catch(error) { alert(error.message); } };
+  const pasteMedia = (event) => {
+    if (!root.isConnected) return;
+    const active = document.activeElement;
+    if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable)) return;
+    const files = [...(event.clipboardData?.items || [])]
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter(Boolean);
+    if (!files.length) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const targetSegmentIndex = currentMode() === "多参考" && Boolean(w(node, "多参考连续拼接")?.value)
+      ? Math.max(0, Number(node.__wwh3MultiRefSegmentIndex) || 0)
+      : null;
+    addFiles(files, targetSegmentIndex);
+  };
+  root.tabIndex = 0;
+  root.addEventListener("paste", pasteMedia);
+  toolbar.title = "点击上传；支持从任意文件夹拖入文件/文件夹，也可选中分段后按 Ctrl+V 粘贴剪贴板素材";
+  function renderMedia() {
+    const caps = limits();
+    const mvMode = currentMode() === "数字人" && digitalVariant() === "MV数字人";
+    note.textContent = mvMode
+      ? "MV参考音乐支持音频或带音轨的视频；选择视频时只提取声音，画面不会参与生成。"
+      : "一个入口混合上传图片、视频和音频；素材按类型自动编号，可同时使用。";
+    hint.textContent = mvMode
+      ? "上传图片 / 音频 / 带音轨视频（视频仅取音乐）"
+      : "点击、拖入或 Ctrl+V 粘贴图片 / 视频 / 音频";
+    modeButtons.forEach((button) => button.classList.toggle("on", button.dataset.mode === currentMode()));
+
+    i2vSubmode.style.display = currentMode() === "图生视频" ? "flex" : "none";
+    multiRefSubmode.style.display = currentMode() === "多参考" ? "flex" : "none";
+    const multiRefContinuous = Boolean(w(node, "多参考连续拼接")?.value);
+    multiRefButtons.forEach(([button, enabled]) => button.classList.toggle("on", enabled === multiRefContinuous));
+    const i2vContinuous = Boolean(w(node, "图生连续拼接")?.value);
+    i2vButtons.forEach(([button, enabled]) => button.classList.toggle("on", enabled === i2vContinuous));
+
+    videoEditSubmode.style.display = currentMode() === "视频编辑" ? "flex" : "none";
+    videoEditToolButtons.forEach((button) => button.classList.toggle("on", button.dataset.tool === String(w(node, "视频编辑功能")?.value || "通用编辑")));
+    videoEditProfile.style.display = "grid";
+    syncCombat();
+    syncSelflift();
+    syncTiling();
+    nsfwButton.classList.toggle("on", Boolean(w(node, "NSFW配置")?.value));
+    nsfwButton.setAttribute("aria-pressed", String(Boolean(w(node, "NSFW配置")?.value)));
+    const customModelConfig = Boolean(w(node, "自定义模型配置")?.value);
+      speedButtons.forEach((button) => button.classList.toggle("on", !Boolean(w(node,"SelfLift二采")?.value) && !customModelConfig && button.dataset.profile === String(w(node, "视频编辑模式")?.value || "均衡8步")));
+    customSpeed.classList.toggle("on", customModelConfig);
+    if (document.activeElement !== customSpeedInput) customSpeedInput.value = String(rememberedCustomSteps());
+    rail.replaceChildren();
+    let total = 0;
+    let capacity = 0;
+    for (const kind of Object.keys(MEDIA)) {
+      const cap = caps[kind];
+      const list = selected(node, kind);
+      const activeList = list.slice(0, cap);
+      total += activeList.length;
+      capacity += cap;
+      for (let i = 0; i < activeList.length; i++) {
+        // Only digital-human MV uses the large waveform/music track. In
+        // multi-reference and video-edit modes audio stays a compact card.
+        const usesMvMusicTrack = currentMode() === "数字人" && digitalVariant() === "MV数字人";
+        if (kind === "音频" && usesMvMusicTrack) continue;
+        const item = document.createElement("div");
+        item.className = `wwh3-media-item${kind === "音频" ? " is-audio" : ""}`;
+        item.draggable = currentMode() === "多参考" && (kind === "图片" || multiRefContinuous);
+        if (kind === "图片") item.style.cursor = "grab";
+        let preview;
+        if (kind === "图片") { preview = document.createElement("img"); preview.src = mediaUrl(activeList[i]); }
+        else if (kind === "视频") { preview = document.createElement("video"); preview.src = mediaUrl(activeList[i]); preview.muted = true; }
+        else {
+          preview = document.createElement("span");
+          preview.className = "wwh3-media-audio-icon";
+          preview.textContent = "♫";
+        }
+        preview.draggable = false;
+        const remove = document.createElement("button");
+        remove.className = "wwh3-x";
+        remove.textContent = "×";
+        remove.onclick = (event) => { event.stopPropagation(); list.splice(i, 1); writeSelected(node, kind, list); renderMedia(); };
+        const label = document.createElement("span");
+        label.className = "wwh3-media-label";
+        label.textContent = currentMode() === "首尾帧" ? (i ? "尾帧" : "首帧") : `@${kind}${i + 1}`;
+        const alias = `@${kind}${i + 1}`;
+        item.onpointerdown = (event) => {event.stopPropagation();};
+        item.ondragstart = (event) => {
+          event.stopPropagation();
+          event.dataTransfer.setData("application/x-wwh3-reference", alias);
+          if (kind === "图片" && currentMode() === "多参考") {
+            event.dataTransfer.setData("application/x-wwh3-image-order", JSON.stringify({node:String(node.id), index:i}));
+          }
+          event.dataTransfer.effectAllowed = "copyMove";
+        };
+        item.ondragover = (event) => {
+          if (kind !== "图片" || currentMode() !== "多参考" || !Array.from(event.dataTransfer.types).includes("application/x-wwh3-image-order")) return;
+          event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect="move";
+          item.style.outline="2px solid #70ffe7";
+        };
+        item.ondragleave = () => {item.style.outline="";};
+        item.ondragend = () => {item.style.outline="";};
+        item.ondrop = (event) => {
+          item.style.outline="";
+          const raw=event.dataTransfer.getData("application/x-wwh3-image-order");
+          if(kind!=="图片" || currentMode()!=="多参考" || !raw)return;
+          event.preventDefault();event.stopPropagation();
+          let source;try{source=JSON.parse(raw);}catch{return;}
+          if(source.node!==String(node.id))return;
+          const ordered=selected(node,"图片"),from=Number(source.index);
+          if(!Number.isInteger(from)||from<0||from>=ordered.length||from===i)return;
+          const [file]=ordered.splice(from,1);ordered.splice(i,0,file);
+          writeSelected(node,"图片",ordered);renderMedia();
+          node.graph?.setDirtyCanvas(true,true);
+        };
+        item.classList.toggle("is-selected", String(idea.value || "").includes(alias));
+        item.title = `${kind === "图片" && currentMode() === "多参考" ? "拖到其他图片上调整顺序；" : ""}点击插入 ${alias} · ${activeList[i].split("/").pop()}`;
+        item.onclick = (event) => {
+          if (event.target.closest(".wwh3-x")) return;
+          insertReferenceAlias(alias);
+          item.classList.add("is-selected");
+        };
+        item.append(preview, remove, label);
+        rail.append(item);
+      }
+    }
+    if (currentMode() === "多参考" && multiRefContinuous) {
+      const fixedAliases = new Set();
+      for (const kind of Object.keys(MEDIA)) {
+        selected(node, kind).forEach((_filename, index) => fixedAliases.add(`@${kind}${index + 1}`));
+      }
+      const dynamicEntries = allMediaEntries().filter((entry) => !fixedAliases.has(entry.alias));
+      for (const entry of dynamicEntries) {
+        const item = document.createElement("div");
+        item.className = `wwh3-media-item${entry.kind === "音频" ? " is-audio" : ""}`;
+        item.draggable = true;
+        const preview = visualPreview(entry);
+        const remove = document.createElement("button");
+        remove.className = "wwh3-x";
+        remove.textContent = "×";
+        remove.onclick = (event) => {
+          event.stopPropagation();
+          const segments = readMultiRefSegments();
+          for (const segment of segments) {
+            segment.assets = (segment.assets || []).filter((asset) => asset.alias !== entry.alias);
+            segment.references = (segment.references || []).filter((alias) => alias !== entry.alias);
+            segment.prompt = String(segment.prompt || "").replaceAll(entry.alias, "").replace(/\s+/g, " ").trim();
+          }
+          writeMultiRefSegments(segments);
+          renderMedia();
+        };
+        const label = document.createElement("span");
+        label.className = "wwh3-media-label";
+        label.textContent = entry.alias;
+        item.ondragstart = (event) => {
+          event.dataTransfer.setData("application/x-wwh3-reference", entry.alias);
+          event.dataTransfer.effectAllowed = "copy";
+        };
+        item.classList.toggle("is-selected", String(idea.value || "").includes(entry.alias));
+        item.title = `拖入分段，或点击在提示词中插入 ${entry.alias} · ${entry.filename.split("/").pop()}`;
+        item.onclick = (event) => {
+          if (event.target.closest(".wwh3-x")) return;
+          insertReferenceAlias(entry.alias);
+          item.classList.add("is-selected");
+        };
+        item.append(preview, remove, label);
+        rail.append(item);
+      }
+    }
+    count.textContent = multiRefContinuous ? `${allMediaEntries().length} / 不限` : `${total}/${capacity}`;
+    const isMvTimeline = (currentMode() === "数字人" && digitalVariant() === "MV数字人") || (currentMode() === "图生视频" && Boolean(w(node, "图生连续拼接")?.value));
+    const cardTotal = selected(node, "图片").slice(0, caps.图片).length
+      + selected(node, "视频").slice(0, caps.视频).length
+      + (currentMode() === "数字人" && digitalVariant() === "MV数字人" ? 0 : selected(node, "音频").slice(0, caps.音频).length);
+    rail.style.display = (cardTotal || (multiRefContinuous && allMediaEntries().length)) && !isMvTimeline ? "flex" : "none";
+    renderMvTimeline();
+    renderMultiRefTimeline();
+    toolbar.style.opacity = capacity ? "1" : ".55";
+    addButton.disabled = !capacity || (!multiRefContinuous && total >= capacity && !(currentMode() === "数字人" && digitalVariant() === "单人数字人"));
+    hint.textContent = currentMode() === "文生视频"
+      ? "文生视频会自动忽略槽位中已有的全部参考素材"
+      : currentMode() === "首尾帧"
+        ? "只使用两张图片：图片1为首帧，图片2为尾帧"
+        : currentMode() === "图生视频"
+          ? (Boolean(w(node, "图生连续拼接")?.value)
+            ? "连续添加图片；拖动每段右边界设置3–15秒，点击图片编辑该段提示词"
+            : (w(node, "启用周期循环")?.value && String(w(node, "循环条件路线")?.value || "").startsWith("单图参考") ? "周期参考路线：同一张图作为主体与画风参考，不固定为输出首帧" : "单图模式只使用1张首帧图片"))
+        : currentMode() === "数字人" && digitalVariant() === "MV数字人"
+          ? "图片按轨道分段；可加入最多3段音乐，每段剪切后按顺序拼接"
+        : currentMode() === "多参考" && multiRefContinuous
+          ? "连续拼接素材总量与分段数不限；每段使用自己的参考内容，生成后按顺序拼接"
+        : currentMode() === "数字人" && digitalVariant() === "单人数字人"
+          ? "需要1张人物图和1段驱动音频"
+          : currentMode() === "数字人" && digitalVariant() === "双人数字人"
+            ? "需要2张人物图和2段音频，音频中间自动加入1秒静音"
+          : currentMode() === "数字人" && digitalVariant() === "MV数字人"
+            ? "上轨排列图片并拖动边界设置每张时长；下轨音乐决定MV总时长"
+        : capacity ? "点击或拖入图片 / 视频 / 音频；点击素材可插入提示词" : "当前生成方式不需要参考素材";
+    renderPromptReferences();
+    if (!mentionPicker.hidden) updateMentionPicker();
+    // Mode switches and media changes can add/remove whole rows.  Always let
+    // the outer node re-wrap the complete visible panel afterwards.
+    requestAnimationFrame(() => node.__wwh3?.resizeForContent?.());
+  }
+  renderMedia();
+  // 提示词紧跟参考素材，符合“先放素材、再描述如何使用”的创作顺序。
+  mediaBody.parentElement.after(ideaBody.parentElement);
+  root.append(samplingPreview);
+  installLoopControls(node, root);
+
+  const sync = () => {
+    storyboardControl.refresh();
+    idea.value = w(node, "增强源提示词")?.value || w(node, "提示词")?.value || "";
+    finalPrompt.value = w(node, "提示词")?.value || "";
+    for (const input of root.querySelectorAll("[data-widget-name]")) {
+      const widget = w(node, input.dataset.widgetName);
+      if (!widget) continue;
+      if (input.type === "checkbox") input.checked = Boolean(widget.value);
+      else input.value = widget.value ?? "";
+    }
+    autoCorrectModel(currentMode());
+      const presetKey = `${currentMode()}|${String(w(node, "视频编辑模式")?.value || "均衡8步")}`;
+    if (node.__wwh3PresetKey !== presetKey) applyPerformancePreset();
+    autoCorrectPromptTemplate(currentMode());
+    updateEnhanceUI();
+    renderMedia();
+  };
+  const consumeAutoRun = () => {
+    const pending = autoRunAfterEnhance;
+    autoRunAfterEnhance = false;
+    return pending;
+  };
+  node.__wwh3 = {
+    root, idea, finalPrompt, enhance, status, renderMedia, sync, modelDetails,
+    disposeProgressListeners, consumeAutoRun, continueGeneration, syncModeWidgets,
+    syncStoryboardCount: storyboardControl.refresh,
+  };
+  return root;
+}
+
+app.registerExtension({
+  name: "minimxa.loop.h3.aurora.v1",
+  async beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData.name !== TARGET) return;
+    addStyle();
+    const created = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+      const result = created?.apply(this, arguments);
+      repairMainState(this);
+      for (const widget of this.widgets || []) hide(widget);
+      this.color = "#08606b";
+      this.bgcolor = "#071326";
+      this.boxcolor = "#53f2dd";
+      const panel = build(this);
+      const shell = document.createElement("div");
+      let panelHeight = 790;
+      const nodeChromeHeight = 60;
+      shell.style.cssText = `width:720px;min-width:720px;height:${panelHeight}px`;
+      shell.append(panel);
+      const dom = this.addDOMWidget("liao2049_h3_panel", "div", shell, { serialize: false, hideOnZoom: false, getHeight: () => panelHeight });
+      const syncPanelSize = () => {
+        const width = Math.max(640, Number(this.size?.[0] || 740) - 20);
+        // Keep widget height independent from the outer LiteGraph node height.
+        // Feeding this.size[1] back into computeSize makes each layout pass grow.
+        const height = panelHeight;
+        shell.style.width = `${width}px`;
+        shell.style.minWidth = `${width}px`;
+        shell.style.height = `${height}px`;
+        panel.style.width = `${width}px`;
+        panel.style.height = `${height}px`;
+        if (dom?.element) {
+          dom.element.style.width = `${width}px`;
+          dom.element.style.minWidth = `${width}px`;
+          dom.element.style.height = `${height}px`;
+        }
+        if (dom) dom.computedHeight = height;
+      };
+      if (dom) dom.computeSize = () => [
+        Math.max(640, Number(this.size?.[0] || 740) - 20),
+        panelHeight,
+      ];
+      this.__wwh3.syncPanelSize = syncPanelSize;
+      let resizingForContent = false;
+      const resizeForContent = () => {
+        if (resizingForContent) return;
+        resizingForContent = true;
+        try {
+        const modelsOpen = Boolean(this.__wwh3?.modelDetails?.open);
+        const minimumNodeWidth = modelsOpen ? 980 : 740;
+        const nodeWidth = Math.max(Number(this.size?.[0] || 0), minimumNodeWidth);
+        // Keep a near-square, fully usable default node while the DOM is still mounting.
+        // A freshly-added DOM widget can report zero child heights for its first frame.
+        const minimumHeight = 730;
+        shell.style.height = "auto";
+        panel.style.height = "auto";
+        const panelStyle = getComputedStyle(panel);
+        const visibleChildren = Array.from(panel.children).filter((child) => getComputedStyle(child).display !== "none");
+        const verticalPadding = (parseFloat(panelStyle.paddingTop) || 0) + (parseFloat(panelStyle.paddingBottom) || 0);
+        const verticalBorder = (parseFloat(panelStyle.borderTopWidth) || 0) + (parseFloat(panelStyle.borderBottomWidth) || 0);
+        const gap = parseFloat(panelStyle.rowGap || panelStyle.gap) || 0;
+        const childrenHeight = visibleChildren.reduce(
+          (total, child) => total + Math.max(child.offsetHeight, child.scrollHeight),
+          0,
+        );
+        const naturalHeight = Math.ceil(verticalPadding + verticalBorder + childrenHeight + gap * Math.max(0, visibleChildren.length - 1));
+        panelHeight = Math.min(4096, Math.max(minimumHeight, naturalHeight));
+        this.setSize([nodeWidth, panelHeight + nodeChromeHeight]);
+        syncPanelSize();
+        this.graph?.setDirtyCanvas?.(true, true);
+        } finally {
+          resizingForContent = false;
+        }
+      };
+      this.__wwh3.resizeForContent = resizeForContent;
+      this.__wwh3.resizeForEnhance = () => requestAnimationFrame(resizeForContent);
+      this.__wwh3.ensureOuterWrap = () => {
+        const requiredHeight = panelHeight + nodeChromeHeight;
+        if (Number(this.size?.[1] || 0) + 1 < requiredHeight) {
+          this.setSize([Math.max(740, Number(this.size?.[0] || 740)), requiredHeight]);
+        }
+      };
+      resizeForContent();
+      syncPanelSize();
+      requestAnimationFrame(resizeForContent);
+      setTimeout(resizeForContent, 80);
+      setTimeout(resizeForContent, 240);
+      return result;
+    };
+    const configured = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function (info) {
+      const result = configured?.call(this, info);
+      // Never restore credentials embedded in older shared workflows.
+      if (w(this, "云端APIKey")) {
+        let localKey = "";
+        try { localKey = localStorage.getItem("minimxa.loop.h3.cloudApiKey") || ""; } catch {}
+        w(this, "云端APIKey").value = localKey;
+      }
+      setTimeout(() => {
+        repairMainState(this);
+        this.__wwh3?.sync();
+        this.__wwh3?.resizeForContent?.();
+      }, 30);
+      return result;
+    };
+    const resized = nodeType.prototype.onResize;
+    nodeType.prototype.onResize = function (size) {
+      const result = resized?.call(this, size);
+      this.__wwh3?.syncPanelSize?.();
+      // Users may widen the node freely, but its height must never become
+      // smaller than the complete inner panel.  One deferred correction keeps
+      // the outer LiteGraph frame coordinated with all visible DOM controls.
+      requestAnimationFrame(() => this.__wwh3?.ensureOuterWrap?.());
+      return result;
+    };
+    const removed = nodeType.prototype.onRemoved;
+    nodeType.prototype.onRemoved = function () {
+      this.__wwh3?.disposeProgressListeners?.();
+      return removed?.apply(this, arguments);
+    };
+    const serialized = nodeType.prototype.onSerialize;
+    nodeType.prototype.onSerialize = function (info) {
+      this.__wwh3?.syncModeWidgets?.();
+      this.__wwh3?.syncStoryboardCount?.();
+      repairMainState(this);
+      const result = serialized?.call(this, info);
+      const liveKey = String(w(this, "云端APIKey")?.value || "").trim();
+      if (liveKey) {
+        try { localStorage.setItem("minimxa.loop.h3.cloudApiKey", liveKey); } catch {}
+      }
+      const keyIndex = this.widgets?.findIndex(item => item.name === "云端APIKey");
+      if (keyIndex >= 0 && Array.isArray(info.widgets_values)) {
+        info.widgets_values = [...info.widgets_values];
+        info.widgets_values[keyIndex] = "";
+      }
+      return result;
+    };
+    const executed = nodeType.prototype.onExecuted;
+    nodeType.prototype.onExecuted = function (message) {
+      const result = executed?.apply(this, arguments);
+      const prompt = String(message?.aurora_enhanced_prompt?.[0] || "").trim();
+      if (prompt && this.__wwh3) {
+        const shouldAutoRun = this.__wwh3.consumeAutoRun?.() || false;
+        this.__wwh3.finalPrompt.value = prompt;
+        const isI2vSegment = Boolean(w(this, "图生视频")?.value)
+          && Boolean(w(this, "图生连续拼接")?.value)
+          && Number.isInteger(this.__wwh3I2vPromptIndex);
+        const isMvSegment = Boolean(w(this, "MV数字人")?.value)
+          && Number.isInteger(this.__wwh3MvPromptIndex);
+        const isMultiRefSegment = Boolean(w(this, "多参考连续拼接")?.value)
+          && Number.isInteger(this.__wwh3MultiRefSegmentIndex);
+        if (isMultiRefSegment) {
+          let segments = [];
+          try { segments = JSON.parse(String(w(this, "多参考拼接配置")?.value || "[]")); } catch (_) {}
+          const promptIndex = this.__wwh3MultiRefSegmentIndex;
+          if (segments[promptIndex]) {
+            segments[promptIndex].prompt = prompt;
+            setW(this, "多参考拼接配置", JSON.stringify(segments));
+            setW(this, "多参考当前分段", promptIndex + 1);
+          }
+          setW(this, "增强源提示词", prompt);
+          this.__wwh3.idea.value = prompt;
+          this.__wwh3.renderMedia?.();
+        } else if (isI2vSegment || isMvSegment) {
+          const promptWidget = isMvSegment ? "MV分段提示词" : "图生分段提示词";
+          const promptIndex = isMvSegment ? this.__wwh3MvPromptIndex : this.__wwh3I2vPromptIndex;
+          let prompts = [];
+          try { prompts = JSON.parse(String(w(this, promptWidget)?.value || "[]")); } catch (_) {}
+          const imageCount = selected(this, "图片").slice(0, 20).length;
+          while (prompts.length < imageCount) prompts.push("");
+          prompts[promptIndex] = prompt;
+          setW(this, promptWidget, JSON.stringify(prompts));
+          setW(this, "增强源提示词", prompt);
+          this.__wwh3.idea.value = prompt;
+        } else {
+          setW(this, "提示词", prompt);
+        }
+        setW(this, "仅增强提示词", false);
+        this.__wwh3.enhance.disabled = false;
+        this.__wwh3.enhance.textContent = "↻ 重新生成增强提示词";
+        this.__wwh3.status.textContent = shouldAutoRun
+          ? "增强完成，正在自动提交视频生成…"
+          : "增强完成并已自动采用，可直接运行生成";
+        if (shouldAutoRun) {
+          setTimeout(() => this.__wwh3?.continueGeneration?.(prompt, "增强提示词"), 0);
+        }
+      }
+      return result;
+    };
+  },
+});
+
+app.registerExtension({
+  name: "minimxa.loop.h3.model.lora.config.repair.v1",
+  async beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData.name !== "MiniMXBase_WenWuH3ModelLoraConfig") return;
+    const created = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+      const result = created?.apply(this, arguments);
+      repairConfigState(this);
+      return result;
+    };
+    const configured = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function (info) {
+      const result = configured?.call(this, info);
+      setTimeout(() => repairConfigState(this), 20);
+      return result;
+    };
+  },
+});
