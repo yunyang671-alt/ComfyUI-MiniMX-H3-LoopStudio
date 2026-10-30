@@ -1,3 +1,7 @@
+# 0.3.1 RunningHub UI compatibility candidate
+
+Support standard dynamic/object combo providers, refresh model choices without changing saved models, declare related nodes using the public RH extension pattern, and display a visible UI build. All generation core files and default model identities remain unchanged. RunningHub acceptance pending.
+
 # Changelog
 
 ## 0.3.0 — 2026-10-30

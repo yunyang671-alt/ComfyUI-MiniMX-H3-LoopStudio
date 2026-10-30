@@ -1,6 +1,7 @@
 import { seedControl } from "./seed_control.js?v=ui-preview-2";
 import { restoreStudioDefaults } from "./ui_defaults.js?v=ref2v8-final-20261030-1";
-import { installLoopControls, applyLoopSamplingProfile } from "./studio_ui_controls.js?v=ref2v8-final-20261030-1";
+import { installLoopControls, applyLoopSamplingProfile } from "./studio_ui_controls.js?v=rh031-20261030";
+import { resolveWidgetChoices, isModelChoice, refreshWidgetChoices } from "./widget_choices.js";
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 
@@ -24,7 +25,7 @@ const MEDIA = {
 };
 
 const w = (node, name) => node.widgets?.find((item) => item.name === name);
-const values = (widget) => widget?.options?.values || widget?.options?.items || [];
+const values = resolveWidgetChoices;
 // Shared filename normalizer used by the model and LoRA ranking helpers.
 // This must live at module scope because the preset buttons call the helpers
 // before entering applyPerformancePreset's local scope.
@@ -322,7 +323,7 @@ function field(node, name, label = name) {
   wrap.append(document.createTextNode(label));
   let input;
   const options = values(widget);
-  if (options.length) {
+  if (options.length || isModelChoice(name)) {
     input = document.createElement("select");
     for (const value of options) {
       const option = document.createElement("option");
@@ -345,6 +346,12 @@ function field(node, name, label = name) {
   }
   if (input.type !== "checkbox") input.value = widget?.value ?? "";
   input.dataset.widgetName = name;
+  if (isModelChoice(name)) {
+    input.__miniMXRefreshChoices = () => refreshWidgetChoices(input, w(node, name));
+    input.addEventListener("focus", input.__miniMXRefreshChoices);
+    input.addEventListener("pointerdown", input.__miniMXRefreshChoices);
+    input.__miniMXRefreshChoices();
+  }
   const numberValue = () => {
     const numeric = Number(input.value);
     if (!Number.isFinite(numeric)) return null;
@@ -512,7 +519,10 @@ function build(node) {
     field(node, "视频SigmaShift", "视频 SigmaShift"), field(node, "音频SigmaShift", "音频 SigmaShift"),
     field(node, "采样器", "采样器"), field(node, "调度器", "调度器"),
   );
-  modelDetails.append(modelSummary, modelGrid);
+  const modelCatalogNote = document.createElement("small");
+  modelCatalogNote.style.cssText = "display:block;color:#9ccad6;line-height:1.6;margin:7px 0";
+  modelCatalogNote.textContent = "候选模型来自平台向本节点提供的列表；模型库有收录不代表此字段已绑定。空列表保留当前模型，请核对平台原生选择器与字段映射。";
+  modelDetails.append(modelSummary, modelCatalogNote, modelGrid);
   const modelSection = document.createElement("div");
   modelSection.className = "wwh3-card wwh3-model-section";
   modelSection.style.padding = "10px";
@@ -3175,6 +3185,7 @@ function build(node) {
     for (const input of root.querySelectorAll("[data-widget-name]")) {
       const widget = w(node, input.dataset.widgetName);
       if (!widget) continue;
+      input.__miniMXRefreshChoices?.();
       if (input.type === "checkbox") input.checked = Boolean(widget.value);
       else input.value = widget.value ?? "";
     }
@@ -3200,6 +3211,12 @@ function build(node) {
 
 app.registerExtension({
   name: "minimxa.loop.h3.aurora.v1",
+  rh: { type: "nodes", nodes: ["MiniMXH3LoopStudio"] },
+  async setup() {
+    if (typeof app.ensureNodesRegistered === "function") {
+      await app.ensureNodesRegistered(new Set([TARGET]));
+    }
+  },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== TARGET) return;
     addStyle();
@@ -3401,6 +3418,7 @@ app.registerExtension({
 
 app.registerExtension({
   name: "minimxa.loop.h3.model.lora.config.repair.v1",
+  rh: { type: "nodes", nodes: ["MiniMXBase_WenWuH3ModelLoraConfig"] },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (nodeData.name !== "MiniMXBase_WenWuH3ModelLoraConfig") return;
     const created = nodeType.prototype.onNodeCreated;

@@ -3,7 +3,7 @@ import importlib
 import logging
 import os
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 BATCH_ENV = "MINIMX_ENABLE_BATCH_SERVICE"
 
 

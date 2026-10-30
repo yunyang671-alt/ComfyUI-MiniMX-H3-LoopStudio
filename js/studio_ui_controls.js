@@ -27,7 +27,8 @@ export function installLoopControls(node, root) {
   reset.title = "恢复已验证配方；保留当前上传素材和提示词。模型不会随采样档位自动切换。";
   const message = document.createElement("span");
   message.style.cssText = "flex:1;min-width:180px;color:#a9dce3;font-size:11px;line-height:1.6";
-  message.textContent = "二采 · 周期循环 · 1376×768 · 目标6秒 · 随机种子";
+  message.textContent = "工作台 0.3.1 · 二采 · 周期循环 · 1376×768 · 目标6秒 · 随机种子";
+  header.dataset.minimxUiBuild = "0.3.1-rh-20261030";
   header.append(reset, message);
   root.prepend(header);
 
@@ -74,7 +75,7 @@ export function installLoopControls(node, root) {
     const actualLora = String(widget(node, "LoRA1")?.value || "无");
     const restored = actualLora === STUDIO_DEFAULTS.LoRA1;
     message.style.overflowWrap = "anywhere";
-    message.textContent = `${restored ? "已恢复默认" : "恢复结果需核对"}；LoRA1：${actualLora}；强度${widget(node, "LoRA1强度")?.value}。当前素材和提示词已保留。`;
+    message.textContent = `工作台 0.3.1 · ${restored ? "已恢复默认" : "恢复结果需核对"}；LoRA1：${actualLora}；强度${widget(node, "LoRA1强度")?.value}。当前素材和提示词已保留。`;
     node.__wwh3?.resizeForContent?.();
     node.graph?.setDirtyCanvas?.(true, true);
   };

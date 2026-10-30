@@ -2,7 +2,7 @@
 
 ## 请求范围
 
-安装Git自定义节点包**ComfyUI-MiniMX-H3-LoopStudio 0.3.0**。根目录有__init__.py、NODE_CLASS_MAPPINGS、WEB_DIRECTORY="./js"，不是工作流JSON，不是23个独立插件。旧提交16c053ddf220d97c50a549d182f5a1edcabe0a3b是0.2旧包，请使用本次0.3提交并记录实际SHA。
+安装Git自定义节点包**ComfyUI-MiniMX-H3-LoopStudio 0.3.1**。根目录有__init__.py、NODE_CLASS_MAPPINGS、WEB_DIRECTORY="./js"，不是工作流JSON，不是23个独立插件。旧提交16c053ddf220d97c50a549d182f5a1edcabe0a3b是0.2旧包，请使用本次0.3提交并记录实际SHA。
 
 基础范围：完整工作台、单张周期采样、SelfLift二采、周期解码。自建批量代码随包但默认关闭；**不请求平台把本地补交绕接会员计费或并发通道**。没有平台任务通道适配前，不承诺会员网页批量即用。
 
@@ -36,7 +36,7 @@ ComfyUI/
 
 ```sh
 cd /path/to/ComfyUI/custom_nodes
-git clone https://github.com/yunyang671-alt/ComfyUI-MiniMX-H3-LoopStudio.git
+git clone --branch runninghub-ui-compat-0.3.1 https://github.com/yunyang671-alt/ComfyUI-MiniMX-H3-LoopStudio.git
 cd ComfyUI-MiniMX-H3-LoopStudio
 python tools/verify_package.py
 python -m pip install -r requirements.txt
@@ -44,7 +44,7 @@ python -m pip install -r requirements.txt
 
 3. 使用平台已支持H3的ComfyUI原生节点和VHS。对照[依赖](../DEPENDENCIES.md)与[模型](MODELS.md)，已有精确节点及模型不重复安装。本包不强改torch/CUDA/torchaudio，不在导入时下载模型。
 4. **保持MINIMX_ENABLE_BATCH_SERVICE未设置或为0。** 基础加载不创建本包SQLite/worker。可选服务异常隔离，不阻止基础节点注册。
-5. 重启后端，发布WEB_DIRECTORY并刷新前端缓存。当前主入口是js/studio_ui_ref2v8_20261030.js；studio_ui_controls.js、ui_defaults.js及其本地import目标必须全部可访问。
+5. 重启后端，发布WEB_DIRECTORY并刷新前端缓存。当前主入口是js/studio_ui_rh031_20261030.js；studio_ui_controls.js、ui_defaults.js及其本地import目标必须全部可访问。
 
 Windows同样使用对应Python与目录，无机器专用DLL/wheel/绝对路径。Git安装即可；不要求Comfy Registry注册，也不要运行pip install .。
 
@@ -59,7 +59,7 @@ python tools/check_models.py /path/to/ComfyUI/models
 python tools/check_models.py /path/to/ComfyUI/models --sha256
 ```
 
-- 日志无本包IMPORT FAILED，版本0.3.0。
+- 日志无本包IMPORT FAILED，版本0.3.1。
 - /object_info有nodes_manifest.json全部23项、原生依赖、VHS。
 - 模型下拉可接受精确Ref2VA与二采权重文件名；不能仅看目录数量。
 - /minimxa-loop/package-features返回batch_enabled:false为正常默认，不是缺文件。平台不转发自定义路由时，使用标准/object_info和日志检查。
@@ -83,3 +83,5 @@ python tools/check_models.py /path/to/ComfyUI/models --sha256
 请提供实际commit SHA、ComfyUI分支/版本、23节点缺失项、原生缺失项、模型缺失项、前端失败URL及首段相关异常，避免用户反复提交零散文件。
 
 标准依据：[ComfyUI Git节点约定](https://docs.comfy.org/custom-nodes/backend/manager)、[元数据](https://docs.comfy.org/registry/specifications)。这不是平台认证。来源及未明确的上游许可状态见[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)，平台采用前请一并核实。
+
+此0.3.1为界面兼容候选，平台页面验收仍待进行。请同时按RUNNINGHUB_UI_COMPAT.md核对模型字段映射。

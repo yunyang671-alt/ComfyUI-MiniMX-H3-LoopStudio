@@ -355,6 +355,7 @@ export function installBatchPanel(node){
 }
 app.registerExtension({
   name:'minimxa.loop.h3.batch.queue.visual.v4',
+  rh:{type:'nodes',nodes:['MiniMXH3LoopStudio']},
   async beforeRegisterNodeDef(nodeType,nodeData){
     if(nodeData.name!=='MiniMXH3LoopStudio')return;
     const configured=nodeType.prototype.onConfigure;
