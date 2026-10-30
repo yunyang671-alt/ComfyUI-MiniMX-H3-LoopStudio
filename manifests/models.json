@@ -73,18 +73,19 @@
       "license_url": "https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler/tree/13ccf95d85d120bdbc92c05b1247a6e147bf54bf"
     },
     {
-      "id": "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
       "category": "loras",
-      "filename": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "filename": "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
       "bytes": 1956193000,
-      "repo_id": "Comfy-Org/MiniMax-H3",
-      "revision": "77aac5182eb85bb20930536bac73e498bbe2bfd7",
-      "repo_path": "loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
-      "download_url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/77aac5182eb85bb20930536bac73e498bbe2bfd7/loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
-      "sha256": "5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c",
-      "purpose": "Ref2VA 蒸馏加速 LoRA",
+      "id": "loras/minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "repo_path": "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "download_url": "https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/30f485ed874aa44c8183348ad361c5eabad318da/minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "sha256": "6a56f41ab4229c9dd845b9501bbd475ee57e112d846cf2e819d534a1ae928c5a",
+      "purpose": "用户最终定版的 Ref2VA 8-step v1.0 768p 蒸馏加速 LoRA；强度1.0",
       "required_for": "base",
-      "license_url": "https://huggingface.co/Comfy-Org/MiniMax-H3/tree/77aac5182eb85bb20930536bac73e498bbe2bfd7"
+      "license_url": "https://huggingface.co/lightx2v/Minimax-h3-Turbo",
+      "sha256_source": "publisher LFS metadata; newly added local file fully hashed"
     },
     {
       "id": "LLM/Qwen/Qwen3-VL-4B-Instruct/chat_template.json",

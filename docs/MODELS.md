@@ -20,3 +20,7 @@
 默认基础循环不强制下载Qwen。检查基础6文件：`python tools/check_models.py /path/to/ComfyUI/models`；含Qwen：添加`--autoprompt`。加`--sha256`可读取全文件校验；默认仅检查路径与大小，不自动下载。
 
 主模型固定Ref2VA INT8 ConvRot；不要因档位切换换成FL2VA、pruned或另一LoRA。二采放大文件名与旧h3_upscaler_lms不同，本版已兼容精确新名。
+
+## 2026-10-30最终默认LoRA
+
+当前默认为`minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors`，强度1.0。[固定官方地址](https://huggingface.co/lightx2v/Minimax-h3-Turbo/resolve/30f485ed874aa44c8183348ad361c5eabad318da/minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors)。18项恢复清单中的原4步项已替换为8步项，旧4步仅用于历史配方。详见[定版说明](STABLE_DEFAULTS.md)。

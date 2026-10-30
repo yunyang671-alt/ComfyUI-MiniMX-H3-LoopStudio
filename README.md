@@ -71,3 +71,7 @@ python main.py --listen 0.0.0.0 --port 8188
 参考[liaodaobin/comfyui-liao2049](https://github.com/liaodaobin/comfyui-liao2049)、[pxl-pshr/ComfyUI-MiniMaxH3-Loop](https://github.com/pxl-pshr/ComfyUI-MiniMaxH3-Loop)、[facok/comfyui-SelfLift](https://github.com/facok/comfyui-SelfLift)。固定上游、修改范围和许可状态见[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。未把组合包误标为统一MIT/GPL；上游许可待核实事项如实保留。
 
 格式参考ComfyUI官方[Git节点安装约定](https://docs.comfy.org/custom-nodes/backend/manager)与[项目元数据说明](https://docs.comfy.org/registry/specifications)。本整理不代表RunningHub认证，接受范围及H3分支兼容以平台验收为准。
+
+## 2026-10-30默认配方定版
+
+一键恢复默认LoRA已按用户实测改为Ref2V 8-step v1.0 768p原版，强度1.0；其他默认值、全部生成核心不变。见[精确身份和恢复说明](docs/STABLE_DEFAULTS.md)。RunningHub会员自动排队仍需单独适配。

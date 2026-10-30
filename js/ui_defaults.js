@@ -31,7 +31,7 @@ export const STUDIO_DEFAULTS = Object.freeze({
   "加速方案": "参考工作流加速",
   "视频SigmaShift": 10.0,
   "音频SigmaShift": 3.0,
-  "LoRA1": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+  "LoRA1": "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
   "LoRA1强度": 1.0,
   "LoRA2": "无",
   "LoRA2强度": 0.0,
