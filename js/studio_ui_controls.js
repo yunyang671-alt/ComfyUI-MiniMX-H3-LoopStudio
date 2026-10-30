@@ -1,4 +1,4 @@
-import { restoreStudioDefaults } from "./ui_defaults.js?v=ui-preview-2";
+import { STUDIO_DEFAULTS, restoreStudioDefaults } from "./ui_defaults.js?v=ref2v8-final-20261030-1";
 
 const widget = (node, name) => node.widgets?.find(item => item.name === name);
 const set = (node, name, value) => { const target = widget(node, name); if (target) target.value = value; };
@@ -71,7 +71,10 @@ export function installLoopControls(node, root) {
     restoreStudioDefaults(node);
     node.__wwh3?.sync();
     refresh();
-    message.textContent = "已恢复默认设置；当前素材和提示词已保留。";
+    const actualLora = String(widget(node, "LoRA1")?.value || "无");
+    const restored = actualLora === STUDIO_DEFAULTS.LoRA1;
+    message.style.overflowWrap = "anywhere";
+    message.textContent = `${restored ? "已恢复默认" : "恢复结果需核对"}；LoRA1：${actualLora}；强度${widget(node, "LoRA1强度")?.value}。当前素材和提示词已保留。`;
     node.__wwh3?.resizeForContent?.();
     node.graph?.setDirtyCanvas?.(true, true);
   };

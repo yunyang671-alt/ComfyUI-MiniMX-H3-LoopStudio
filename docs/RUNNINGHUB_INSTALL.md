@@ -44,7 +44,7 @@ python -m pip install -r requirements.txt
 
 3. 使用平台已支持H3的ComfyUI原生节点和VHS。对照[依赖](../DEPENDENCIES.md)与[模型](MODELS.md)，已有精确节点及模型不重复安装。本包不强改torch/CUDA/torchaudio，不在导入时下载模型。
 4. **保持MINIMX_ENABLE_BATCH_SERVICE未设置或为0。** 基础加载不创建本包SQLite/worker。可选服务异常隔离，不阻止基础节点注册。
-5. 重启后端，发布WEB_DIRECTORY并刷新前端缓存。当前主入口是js/studio_ui_preview_v2.js；studio_ui_controls.js、ui_defaults.js及其本地import目标必须全部可访问。
+5. 重启后端，发布WEB_DIRECTORY并刷新前端缓存。当前主入口是js/studio_ui_ref2v8_20261030.js；studio_ui_controls.js、ui_defaults.js及其本地import目标必须全部可访问。
 
 Windows同样使用对应Python与目录，无机器专用DLL/wheel/绝对路径。Git安装即可；不要求Comfy Registry注册，也不要运行pip install .。
 
