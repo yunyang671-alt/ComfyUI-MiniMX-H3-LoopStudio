@@ -1,0 +1,16 @@
+[project]
+name = "minimx-h3-loopstudio"
+version = "0.3.0"
+description = "ComfyUI H3 studio with bundled periodic sampling, SelfLift and decode adapters"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy", "safetensors", "aiohttp", "Pillow", "psutil", "opencv-python", "imageio-ffmpeg"]
+# Mixed upstream rights: see THIRD_PARTY_NOTICES.md. No blanket relicensing.
+# Git-installable ComfyUI plugin, not a wheel/PyPI package.
+
+[project.urls]
+Repository = "https://github.com/yunyang671-alt/ComfyUI-MiniMX-H3-LoopStudio"
+Documentation = "https://github.com/yunyang671-alt/ComfyUI-MiniMX-H3-LoopStudio/blob/main/docs/RUNNINGHUB_INSTALL.md"
+"Bug Tracker" = "https://github.com/yunyang671-alt/ComfyUI-MiniMX-H3-LoopStudio/issues"
+
+# No fabricated Comfy Registry PublisherId: this release is installed via Git.

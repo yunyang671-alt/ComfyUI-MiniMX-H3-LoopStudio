@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "required": [
+    {
+      "repository": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+      "node_ids": [
+        "VHS_VideoCombine"
+      ],
+      "reuse_existing": true
+    }
+  ],
+  "optional_autoprompt": {
+    "repository": "https://github.com/1038lab/ComfyUI-QwenVL",
+    "revision": "1b67b443918801f571714bab636edc1845b7002a",
+    "node_ids": [
+      "AILab_QwenVL"
+    ],
+    "required_inputs": [
+      "model_name",
+      "quantization",
+      "attention_mode",
+      "custom_prompt",
+      "max_tokens",
+      "keep_model_loaded",
+      "seed",
+      "image"
+    ],
+    "native_nodes": [
+      "LoadImage",
+      "ImageScaleToTotalPixels",
+      "PreviewAny"
+    ],
+    "model": "Qwen/Qwen3-VL-4B-Instruct",
+    "runninghub_member_queue_supported": false
+  },
+  "optional_acceleration": {
+    "repository": "https://github.com/kijai/ComfyUI-KJNodes",
+    "node_ids": [
+      "ModelPreviewOverrideKJ",
+      "PathchSageAttentionKJ"
+    ],
+    "required_for_loop": false
+  }
+}

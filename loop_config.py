@@ -51,6 +51,8 @@ def validate_request(values):
     route = values.get("循环条件路线", REFERENCE_ROUTE)
     if route not in {REFERENCE_ROUTE, ANCHOR_ROUTE}:
         raise ValueError("未知循环条件路线，请重新选择参考路线或实验首帧路线。")
+    if route == REFERENCE_ROUTE and "minimax_h3_fl2va" in str(values.get("模型", "")).lower():
+        raise ValueError("单图参考周期路线需要 Ref2VA 模型；当前是 FL2VA。请在模型选项选择 minimax_h3_ref2va_int8_convrot.safetensors，再运行。")
     if int(values.get("循环视角", 1)) not in (1, 2):
         raise ValueError("循环视角只能为1或2。")
     plan = frame_plan(values.get("循环正片帧数", 204), values.get("循环上下文段数", 1))

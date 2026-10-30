@@ -1,82 +1,73 @@
 # MiniMX H3 LoopStudio
 
-为 ComfyUI 的 MiniMax H3 完整创作台增加采样阶段的周期循环，以及 SelfLift 二采放大的周期时间边界处理。版本：`0.2.0-cloud-test`。
+**版本0.3.0 · RunningHub安装交付整理版 · 2026-10-30**
 
-**提交给 RunningHub 的节点仓库地址：** https://github.com/yunyang671-alt/ComfyUI-MiniMX-H3-LoopStudio
+ComfyUI自定义节点包：完整H3工作台、周期采样、周期SelfLift二采和周期解码。补齐最新代码、模型文件名兼容及前端资源，保留最终稳定配方的生成核心。**本版是安装结构与可选服务隔离更新，不是新的循环算法。**
 
-## 添加原因
+给平台技术人员：先读 **[RunningHub安装与验收](docs/RUNNINGHUB_INSTALL.md)**；添加理由在 **[提交说明](docs/RUNNINGHUB_REQUEST.md)**。
 
-工作流使用自定义节点 `MiniMXH3LoopStudio`。只有工作流 JSON、或者环境中只有其他 H3 创作台节点时，无法识别此类，会出现 `has no class_type`、节点爆红、参数显示 `UNKNOWN` 等问题。需要平台安装本仓库的 Python 节点及前端扩展，并重启后端、刷新前端。
+## 安装范围
 
-本仓库只交付节点代码、通用提示词模板、依赖清单和说明，不附带任何人的工作流 JSON、输入素材、任务记录、API Key 或模型权重。
+| 内容 | 本包提供 | 环境需提供 |
+|---|---|---|
+| 工作台及内部节点 | 23个，ID与旧包一致 | 支持H3的ComfyUI原生节点 |
+| 周期模型包装、采样、解码 | 完整源码 | H3主模型、编码器、两个VAE |
+| SelfLift二采 | 完整vendor及周期适配 | 放大权重、所选LoRA |
+| 视频合成 | 不重复打包 | VHS的VHS_VideoCombine |
+| 自建批量、TXT、命名、可视化及本地保存 | 全代码随包，默认不启动 | 管理员启用、可写目录及同源接口 |
+| 自动看图写词 | 自建批量的图构建代码 | 可选QwenVL节点和完整Qwen4B模型 |
+| RunningHub会员网页自动补交 | **未适配** | 平台任务通道适配，不能靠装节点替代 |
 
-## 安装内容与完整依赖
+本仓库只放节点源码、通用模板、工具与安装资料；不放第三方工作流、个人素材、任务记录、密钥或大模型实体。
 
-本仓库根目录就是一个可安装的 ComfyUI 节点包，**克隆一个仓库即可**：
+## 标准Git安装
+
+仓库根目录就是节点目录；不要再嵌套一层，不要只拷贝单个Python文件。
 
 ```sh
-cd ComfyUI/custom_nodes
+cd /path/to/ComfyUI/custom_nodes
 git clone https://github.com/yunyang671-alt/ComfyUI-MiniMX-H3-LoopStudio.git
-# 使用 ComfyUI 自己的 Python 环境执行；不要另装不同版本的 torch
-python -m pip install -r ComfyUI-MiniMX-H3-LoopStudio/requirements.txt
+cd ComfyUI-MiniMX-H3-LoopStudio
+# 使用运行ComfyUI的同一个Python/虚拟环境
+python tools/verify_package.py
+python -m pip install -r requirements.txt
 ```
 
-随后重启 ComfyUI 后端，浏览器强制刷新。RunningHub 用户将本仓库地址交给平台技术人员添加；上传 JSON 并不能安装 Python 节点。
+重启ComfyUI，浏览器强制刷新。本包不强装、升级或降级平台的torch、CUDA、torchaudio，也不在导入时下载模型。pyproject.toml提供项目元数据，不代表已注册Comfy Registry；不需要pip install .、虚构PublisherId或额外install.py。
 
-| 组成 | 是否包含 | 说明 |
-| --- | --- | --- |
-| 完整 H3 创作台 Python 和 JavaScript 界面 | 包含 | 使用独立节点 ID 和接口前缀 |
-| 循环模型包装、周期解码 | 包含 | 固定版本 Loop 源码内置于 `_loop_vendor.py` |
-| SelfLift 采样、放大网络、分块和辅助文件 | 包含 | 全套所需模块位于 `selflift_vendor/` |
-| 周期 SelfLift 适配及控件 | 包含 | `loop_runtime.py`、`periodic_ops.py`、`loop_config.py`、`js/loop_controls.js` |
-| 模板、随机种子控件、依赖诊断 | 包含 | 模板属于节点功能资源 |
-| ComfyUI 原生 H3、AV latent、采样、音视频节点 | 环境提供 | 需要具有这些接口的 ComfyUI；详见 `DEPENDENCIES.md` |
-| VHS 视频合成 | 环境提供 | 已有 `VHS_VideoCombine` 时无需重复安装 |
-| KJ 预览和 SageAttention 加速 | 可选，环境提供 | 不作为基础循环依赖；缺少时使用原生注意力，速度可能降低 |
-| 模型权重和 CUDA 二进制包 | 不包含 | 循环本身无需新增权重；SelfLift 使用环境已有的兼容放大权重 |
+**更新必须完整替换目录。** 旧js/studio.js必须从活动目录移走，否则与新js/studio_ui_preview_v2.js重复初始化。旧目录如需保留，请放到custom_nodes之外。不要混装不同版本文件。
 
-**不需要再单独安装 `ComfyUI-MiniMaxH3-Loop`、`comfyui-SelfLift` 或原创作台包，才能注册本包的循环节点。** 本包不会注册或替换其他包原有节点的 ID。即使平台已有 Loop/SelfLift，仍需要本包内适配过的私有代码；两者不会互相覆盖。
+## 无推理验收
 
-实际导出的全部 **23 个节点 ID** 见 [`nodes_manifest.json`](nodes_manifest.json)，其中主要节点为：
-
-- `MiniMXH3LoopStudio`：完整创作台入口，已有使用此 ID 的工作流无需改名。
-- `MiniMXH3LoopModel`：采样周期模型包装。
-- `MiniMXH3SelfLiftLoopSampler`：周期 SelfLift 两阶段采样。
-- `MiniMXH3LoopDecode`：周期音视频解码。
-- `MiniMXBase_*`：随包提供的 19 个创作台内部节点。
-
-## 使用范围
-
-1. 选择单图，打开“启用周期循环”；推荐“单图参考”路线。图片提供外观参考，不强制成为第 1 帧。保留首帧锚定属于实验路线。
-2. 输出帧数是 17 的整数倍。默认 204 帧，在 24 fps 下为 8.5 秒；内部额外的 5 帧仅用于 H3 上下文，周期解码会移除。循环开启时普通时长控件会禁用。
-3. SelfLift 维持实际两阶段采样及学习式潜空间放大，对时间卷积使用周期边界。循环模式要求 `rho=0`、关闭高清分块。全周期放大可能增加显存占用。
-4. 精确使用用户选定的模型、VAE 和 LoRA，缺少所选文件时明确报错。循环开关关闭后保留创作台的其他生成模式；目前周期功能限定单图模式。
-5. 生成结果仍由提示词、模型和采样决定；不能保证所有画面都达到主观无缝效果。
-
-## 平台一次核查
-
-完成安装、ComfyUI 加载全部节点后，在同一服务地址打开：
-
-```text
-/minimxa-loop/package-diagnostics
+```sh
+python tools/check_server.py http://127.0.0.1:8188
+python -m unittest discover -s tests -p "test_*.py"
+python tools/check_models.py /path/to/ComfyUI/models
+# 可选：读取全部权重，比较SHA256，会有较多磁盘IO
+python tools/check_models.py /path/to/ComfyUI/models --sha256
 ```
 
-该只读接口汇总本包 23 个节点、原生节点、可选加速节点和模型目录数量。不会下载、安装或加载模型，不返回用户素材或模型路径。请平台一次核查 `missing_bundled_nodes` 和 `missing_native_nodes` 均为空，并确认 VHS 可用；选定模型文件还需要核对实际工作流参数。原生节点缺失应升级平台 ComfyUI，不能靠重复安装本包修复。
+check_server只GET节点信息，不提交任务。默认检查23个本包节点、原生依赖、VHS和精确H3模型下拉项。通过这些检查不等于已验证平台GPU推理或画面接缝。
 
-完整接口清单、可选依赖及故障定位见 [`DEPENDENCIES.md`](DEPENDENCIES.md)。
+只读接口：/minimxa-loop/package-diagnostics、/minimxa-loop/package-features。平台若不转发自定义接口，可用标准/object_info及服务日志核对。23节点用途见[节点清单](docs/NODES.md)，模型来源/大小/SHA256见[模型说明](docs/MODELS.md)与[机器清单](manifests/models.json)。
+
+## 自建批量服务（可选）
+
+默认MINIMX_ENABLE_BATCH_SERVICE=0。不导入批量服务，不创建其SQLite，不启动worker，不向/prompt补交。单张周期生成和工作台正常提供。
+
+自建ComfyUI管理员在启动服务前显式设置：
+
+```sh
+export MINIMX_ENABLE_BATCH_SERVICE=1
+python main.py --listen 0.0.0.0 --port 8188
+```
+
+可选服务因目录权限等失败时，日志保留异常，基础节点保持加载；修复后重启。不能把本地队列当作RunningHub会员队列。本地保存仍需浏览器授权并保持网页打开。
+
+批量在创建时保存参数快照；继续旧批次不会自动使用页面后来改动的秒数、分辨率和档位。周期时长按17帧对齐，24fps：3秒目标→68帧/2.8333秒，4秒→102帧/4.25秒，6秒→136帧/5.6667秒。周期约束不保证任意图片/种子/提示词均视觉无缝；文件是否重复播放由播放器控制。
 
 ## 来源与许可
 
-本项目包含对以下节点代码的引用和修改，不声称其为本项目原创：
+参考[liaodaobin/comfyui-liao2049](https://github.com/liaodaobin/comfyui-liao2049)、[pxl-pshr/ComfyUI-MiniMaxH3-Loop](https://github.com/pxl-pshr/ComfyUI-MiniMaxH3-Loop)、[facok/comfyui-SelfLift](https://github.com/facok/comfyui-SelfLift)。固定上游、修改范围和许可状态见[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。未把组合包误标为统一MIT/GPL；上游许可待核实事项如实保留。
 
-| 作者 / 仓库 | 固定提交 | 用途 |
-| --- | --- | --- |
-| [liaodaobin/comfyui-liao2049](https://github.com/liaodaobin/comfyui-liao2049) | `969937d331c51215d5396da03a1c5d977742c28e` | 创作台、界面、辅助节点和提示词模板 |
-| [pxl-pshr/ComfyUI-MiniMaxH3-Loop](https://github.com/pxl-pshr/ComfyUI-MiniMaxH3-Loop) | `733647e41a7574a354639623d4b50e7f6152ee09` | 原始周期采样和解码算法 |
-| [facok/comfyui-SelfLift](https://github.com/facok/comfyui-SelfLift) | `835c3cf7919410f71f414688f049c6ca497789d0` | SelfLift 两阶段采样和学习式放大 |
-
-来源文件、修改范围和许可状态见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。Loop 的 GPL-3.0 正文随包保留。其余两个固定上游未提供独立 LICENSE，不能把本仓库整体解释为 MIT 或统一的开源授权；平台采用和再分发前应核实上游许可。
-
-## 验证状态
-
-本版用于云端人工测试。已做源码结构、图展开、合成张量的周期操作和两阶段采样检查；这些检查不等于真实 H3 模型推理。尚未确认 RunningHub 对本包的安装、显卡内核兼容性或实际生成效果，云端测试由使用者完成。
+格式参考ComfyUI官方[Git节点安装约定](https://docs.comfy.org/custom-nodes/backend/manager)与[项目元数据说明](https://docs.comfy.org/registry/specifications)。本整理不代表RunningHub认证，接受范围及H3分支兼容以平台验收为准。

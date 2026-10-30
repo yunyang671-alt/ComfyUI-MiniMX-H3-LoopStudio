@@ -10,7 +10,7 @@
 - `h3_optional_sampling.py`：选择周期 SelfLift 采样器，保留上游采样配方及关闭循环路径。
 - `h3_dependencies.py`：接口命名空间调整。
 - `h3_latent_upscaler_embedded.py`、`h3_segmented_avatar.py`：随包辅助源码；后者未单独注册额外数字人节点。
-- `js/liao_h3_ui_20260823e.js` → `js/studio.js`：独立节点 ID、接口命名空间、循环面板及导入时模型保留。
+- `js/liao_h3_ui_20260823e.js` → `js/studio_ui_preview_v2.js`：独立节点 ID、接口命名空间、循环面板及导入时模型保留。
 - `js/seed_control.js`、`prompt_templates/*.md`：上游功能资源。
 
 固定上游及当前 GitHub 仓库未发现独立 LICENSE，GitHub 元数据 license 为 null。本项目不为这些代码新授 MIT/GPL 等许可；相关权利归原权利人，公开部署、再分发的许可范围需向上游核实。
@@ -46,3 +46,9 @@
 - SageAttention：https://github.com/thu-ml/SageAttention
 
 这些环境项目未在本仓库重复打包，其许可由各项目自行提供。
+
+## 0.3.0交付整理补充（2026-10-30）
+
+新增批量Python/JS、可选服务隔离platform_config.py、UI默认值与控件、测试、清单和安装工具为本项目增补，新增代码按前述GPL-3.0提供；不改变studio、SelfLift等上游来源与许可状态。核心源码未为本次打包改写。
+
+可选Qwen写词使用外部[1038lab/ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-QwenVL)，固定提交1b67b443918801f571714bab636edc1845b7002a（GPL-3.0），本仓库不重复分发此插件。模型[Qwen/Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct)为其发布者提供（Apache-2.0）。H3权重及latent upscaler分别来自[Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)、[LBH-123-AI/Minimax_h3_latent_Upscaler](https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler)；权重不在本仓库内，其许可以各发布页为准。精确revision见manifests/models.json。

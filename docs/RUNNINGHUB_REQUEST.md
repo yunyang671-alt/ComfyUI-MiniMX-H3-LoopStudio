@@ -1,17 +1,15 @@
-# 可直接提交给 RunningHub 的添加申请
+# 节点添加原因与提交说明
 
-仓库地址：https://github.com/yunyang671-alt/ComfyUI-MiniMX-H3-LoopStudio
+仓库：https://github.com/yunyang671-alt/ComfyUI-MiniMX-H3-LoopStudio
 
-添加原因：工作流使用 `MiniMXH3LoopStudio`，平台未注册该节点时会显示 UNKNOWN 参数，并提示 `has no class_type`。需要安装此完整节点包和前端扩展，重启后端后刷新前端。
+请求版本：**0.3.0**，请记录commit SHA，不使用旧0.2缓存或只上传JSON。
 
-节点说明：为 H3 完整创作台提供单图采样阶段周期循环，以及 SelfLift 二采的周期边界适配。仓库内包含创作台、固定 Loop 算法、SelfLift 全部必要模块和前端，根目录可直接作为 custom_nodes 包安装，合计 23 个节点。无需另外补装 Loop 或 SelfLift 仓库。
+原因：工作流调用MiniMXH3LoopStudio，平台原有H3创作台不是这个class_type，会出现缺失/UNKNOWN。仅安装其他H3工作台不能替代本包周期模型包装、周期SelfLift、周期解码。
 
-请一次核查：
+本仓库整体是**一个节点包，包含23个注册ID**。全部Python/helper/前端齐全，不是申请23个独立仓库。原始H3、Loop、SelfLift作者与固定源码版本见THIRD_PARTY_NOTICES.md；不收录他人工作流。内置Loop/SelfLift无需重复安装；已有VHS、原生节点和精确模型文件即可复用。
 
-1. 使用 ComfyUI 的 Python 安装 `requirements.txt`，保留原有 torch 及与其匹配的 torchaudio。
-2. 重启后检查 `nodes_manifest.json` 中全部 23 个 ID，确认没有导入失败。
-3. 打开同一 ComfyUI 服务的 `/minimxa-loop/package-diagnostics`，原生节点和随包节点缺失清单均应为空。
-4. 如环境已有 `VHS_VideoCombine`，无需重复添加。SageAttention / KJ 预览属于可选能力。
-5. 模型使用实际任务选定的已有权重；循环本身不增加权重。启用 SelfLift 时需要兼容的 H3 学习式放大权重。
+旧申请后补齐最新工作台、参数保护、模型文件名识别及自建批量代码。默认关闭自建队列，避免受限平台因SQLite/worker导致整包加载失败；生成核心保持不变，23ID不变。
 
-代码引用、作者地址、固定版本和许可状态已写在 README 与 THIRD_PARTY_NOTICES.md。仓库不包含任何第三方工作流 JSON 或用户素材。当前为云端人工测试版本；请先确认平台安装及接口兼容，实际云端生成由用户测试。
+基础需求：完整工作台+单张周期循环+SelfLift二采+VHS输出。**RunningHub会员网页自动补交未适配，不列为已支持能力。** Qwen写词可选，已有AILab_QwenVL时核对版本和完整Qwen4B模型，无需申请另一套私有写词节点。
+
+请按[完整安装与验收](RUNNINGHUB_INSTALL.md)一次检查代码、原生接口、模型和前端。模型官方地址、精确版本、大小及SHA256均随仓库提供；无需访问用户服务器、读取私人工作流或获取API密钥。

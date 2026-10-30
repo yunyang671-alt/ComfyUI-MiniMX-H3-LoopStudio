@@ -36,7 +36,7 @@ def report():
         except Exception:
             models[category] = {'count': 0}
     return {
-        'version': '0.2.0-cloud-test',
+        'version': '0.3.0',
         'ready_for_loop_graph': not missing_native and not missing_local,
         'missing_bundled_nodes': missing_local,
         'missing_native_nodes': missing_native,

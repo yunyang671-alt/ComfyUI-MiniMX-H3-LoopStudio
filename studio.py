@@ -2463,8 +2463,13 @@ class WenWuMiniMaxH3Unified:
         required["注意力机制"] = (["SageAttention", "Comfy Kitchen", "Kitchen + Sol-Attn", "PyTorch"], {"default": "SageAttention"})
         required["SelfLift二采"] = ("BOOLEAN", {"default": False})
         selflift_models = [name for name in folder_paths.get_filename_list("latent_upscale_models")
-                           if name.replace(chr(92), "/").split("/")[-1].startswith("h3_upscaler_lms")]
+                           if name.replace(chr(92), "/").split("/")[-1].startswith("h3_upscaler_lms")
+                           or name.replace(chr(92), "/").split("/")[-1] in {
+                               "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+                               "minimax_h3_latent_upscaler_3d_bf16.safetensors"}]
         default_upscaler = "h3_upscaler_lms_v0.1.safetensors"
+        if default_upscaler not in selflift_models and selflift_models:
+            default_upscaler = selflift_models[0]
         if default_upscaler not in selflift_models:
             selflift_models.insert(0, default_upscaler)
         required["二采放大模型"] = (selflift_models, {"default": default_upscaler})
@@ -2512,6 +2517,18 @@ class WenWuMiniMaxH3Unified:
                  模型权重精度, SageAttention, 允许编译, 画面比例, 百万像素, 尺寸倍数, 时长秒, 提示词, 随机种子,
                  采样器, 调度器, 采样步数, 降噪强度, 参考图尺寸="match", 文生视频=False, 图生视频=False, 首尾帧=False, **kwargs):
         loop_enabled = bool(kwargs.get("启用周期循环", False))
+        if kwargs.get("SelfLift二采"):
+            import folder_paths
+            available_upscalers = folder_paths.get_filename_list("latent_upscale_models")
+            old_upscaler = kwargs.get("二采放大模型", "h3_upscaler_lms_v0.1.safetensors")
+            replacement = "minimax_h3_latent_upscaler_3d_fp16.safetensors"
+            if old_upscaler == "h3_upscaler_lms_v0.1.safetensors" and old_upscaler not in available_upscalers and replacement in available_upscalers:
+                kwargs["二采放大模型"] = replacement
+                print(f"[MiniMX SelfLift] Missing legacy upscaler; using verified compatible {replacement}")
+        if loop_enabled:
+            # Loop mode must preserve the selected resources even when a UI
+            # speed/profile control resets this hidden flag before submission.
+            kwargs["自定义模型配置"] = True
         loop_plan = loop_route = None
         if loop_enabled and not (kwargs.get("仅增强提示词") and kwargs.get("启用提示词增强")):
             request = dict(kwargs, 模型=模型, 文本编码器=文本编码器, 视频VAE=视频VAE, 音频VAE=音频VAE,

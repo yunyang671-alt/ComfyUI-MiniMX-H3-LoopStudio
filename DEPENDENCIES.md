@@ -1,38 +1,30 @@
-# 平台依赖与故障定位
+# 依赖分层（0.3.0）
 
-## 必装：一个仓库
+## 必需节点源码与宿主
 
-将本仓库整体安装到 `ComfyUI/custom_nodes/ComfyUI-MiniMX-H3-LoopStudio/`。不要只复制 `__init__.py`，也不要只复制 `studio.py`。`js/`、`selflift_vendor/`、`prompt_templates/`、`_loop_vendor.py`、`nodes_manifest.json` 都是安装内容。
+整个仓库安装一次，包含23个ID，见nodes_manifest.json。Loop、SelfLift及helper源码内置，不要求再装另一套Loop、SelfLift或T8插件。js/与prompt_templates/同样是运行资源。
 
-Python 包清单：`torch`（使用平台原有版本）、`numpy`、`safetensors`、`aiohttp`、`Pillow`、`psutil`、`opencv-python`、`imageio-ffmpeg`、与 torch 匹配的 `torchaudio`。本包不会在启动时自动执行 pip。
+使用ComfyUI的Python。来源环境为Python3.12、ComfyUI0.43.0、前端1.57.6、PyTorch2.13/cu132；这是来源记录，不是全平台强锁。原生接口缺失应升级平台H3分支，不是再复制一套comfy到custom_nodes。
 
-## ComfyUI 原生能力
+requirements.txt仅声明numpy、safetensors、aiohttp、Pillow、psutil、opencv-python、imageio-ffmpeg。torch/torchaudio由宿主保持匹配，不把另一环境pip freeze强行安装到平台。
 
-需要支持 MiniMax H3 的现代 ComfyUI，并提供 `comfy.patcher_extension`、`comfy.ldm.minimax`、`comfy.nested_tensor`、`comfy_execution.graph_utils`、H3 FunControlPatch 和音视频解码接口。不能仅根据版本字符串判断平台分支是否齐全。
+原生节点详见diagnostics.py:NATIVE_REQUIRED；关键接口包括comfy.ldm.minimax、comfy.nested_tensor、comfy.patcher_extension、comfy_execution.graph_utils及H3 FunControlPatch。类名相同但接口不同仍可能失败。
 
-必须存在的原生节点见 `diagnostics.py` 的 `NATIVE_REQUIRED`。包括 H3 条件和 SigmaShift、AV latent 合并拆分、自定义采样器、模型和 VAE 加载器、图像/视频/音频 IO、注意力后端。它们来自 [ComfyUI](https://github.com/Comfy-Org/ComfyUI)，无需把原生代码再次复制到 custom_nodes。
+## 外部节点（环境已有即复用）
 
-运行服务的 `/minimxa-loop/package-diagnostics` 汇总检查；也可对已启动服务执行 `python tools/check_server.py http://127.0.0.1:8188`。后者读取标准 `/object_info`，即使本包根本导入失败也能列出缺失的 23 个节点。
+| 功能 | 插件/节点 | 要求 |
+|---|---|---|
+| MP4输出 | [VHS](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)，VHS_VideoCombine | 必需 |
+| Qwen看图写词 | [QwenVL](https://github.com/1038lab/ComfyUI-QwenVL)，AILab_QwenVL | 仅自动写词；版本和字段见manifests/external-nodes.json |
+| 写词图缩放/显示 | LoadImage、ImageScaleToTotalPixels、PreviewAny | ComfyUI原生；自动写词需要 |
+| 预览/可选Sage补丁 | [KJNodes](https://github.com/kijai/ComfyUI-KJNodes)，ModelPreviewOverrideKJ、PathchSageAttentionKJ | 可选 |
+| 注意力加速 | SageAttention及匹配H3补丁 | 可选；按实际GPU/Python/torch选wheel，不随包硬装 |
+| 旧Llama/GGUF增强 | llama-cpp-python及GGUF | 可选，与Qwen自动写词不同 |
 
-## 环境已有时不重复安装
+QwenVL上游自行声明transformers、accelerate、bitsandbytes等依赖，由平台核对后安装在兼容环境。仅循环生成不强制新增这些库。H3的32B编码器不是完整聊天模型。
 
-- 视频合成：[`ComfyUI-VideoHelperSuite`](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite) 的 `VHS_VideoCombine`。它是输出端节点，不是循环算法的一部分；平台已有就无需复制。
-- 可选加速/预览：[`ComfyUI-KJNodes`](https://github.com/kijai/ComfyUI-KJNodes)。`PathchSageAttentionKJ` 和 `ModelPreviewOverrideKJ` 由该包提供。上游创作台还兼容环境中的 `MiniMaxH3MemoryEfficientSageAttentionPatch`；本包不会假设平台必然有此补丁，只有相关补丁和 Python 加速库齐备时才启用。缺少 SageAttention 时创作台会发出速度提示并回退原生注意力，未安装预览时跳过预览节点。SageAttention 的 wheel 必须匹配实际 GPU、CUDA、Python、PyTorch，不能通过随包塞入任意 wheel 解决。
-- `MinimaxH3LatentUpscalerNode3D`、`MiniMaxH3LatentUpscaleCombined` 仅为上游保留的兼容分支。本包已提供内置潜空间放大节点，不要求安装这两个外部插件。
-- Loop 原文件包含未使用的 ControlVideo / 插帧类，但本包只使用私有循环包装和解码，不对外注册插帧节点，因此不依赖 FILM、RIFE 或 ComfyUI-Frame-Interpolation。
-- 本地提示词增强可选 `llama-cpp-python` 和兼容 GGUF；云端增强可选用户自行配置的服务。均不是视频循环生成的必要依赖。本包不包含用户 API Key。
+## 模型与服务
 
-## 模型文件
+六份H3配方权重及可选完整Qwen4B目录见manifests/models.json；精确现有权重优先复用。二采权重为minimax_h3_latent_upscaler_3d_fp16.safetensors。主模型保留Ref2VA，不因切换均衡/二采/质量换成FL2VA。
 
-循环算法没有新增独立权重。基础生成需要用户选择的 H3 diffusion model、对应文本编码器、视频 VAE、音频 VAE；使用的 LoRA 也须已存在。启用 SelfLift 时还需要兼容 `h3_upscaler_lms` 学习式放大模型，目录为 `models/latent_upscale_models/`。权重以各自发布者许可及来源为准，本仓库不代发、不替换用户已选择的权重，也不包含私人模型配方。
-
-## 一次验收清单
-
-1. 后端启动没有本包 `IMPORT FAILED`；Python requirements 全部可导入。
-2. `/object_info` 中 `nodes_manifest.json` 的 23 个 ID 全部存在。
-3. `/minimxa-loop/package-diagnostics` 中原生节点缺失列表为空，VHS 状态可用。
-4. 前端网络请求能加载本包 `studio.js`、`loop_controls.js`、`seed_control.js`；节点出现完整工作台及循环开关。
-5. 工作流选定的全部权重在实际模型列表中。目录数量大于零不等于某个具体文件存在。
-6. 用单张自有图片做一次云端人工测试，再检查输出帧数、时长、接缝及 SelfLift 日志。
-
-第 1—5 项用于在一次安装中排查所有已知代码和环境依赖；第 6 项才检验真实推理。平台后端版本、权限和硬件内核仍需平台确认。
+批量的sqlite3/threading等为标准库，不是新增一套插件。默认关闭，不创建队列数据库/worker。显式启用需可写user/default/minimx_batch/、input/、output/及同源API。RunningHub会员自动补交未适配，平台不启用此服务也可安装基础节点。

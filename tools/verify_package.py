@@ -9,6 +9,10 @@ import re
 def main():
     root = Path(__file__).resolve().parents[1]
     expected = json.loads((root / 'SHA256SUMS.json').read_text(encoding='utf-8'))
+    actual = {p.relative_to(root).as_posix() for p in root.rglob('*')
+              if p.is_file() and '__pycache__' not in p.parts and '.git' not in p.parts
+              and p.name != 'SHA256SUMS.json' and p.suffix != '.pyc'}
+    assert actual == set(expected), {'unlisted': sorted(actual-set(expected)), 'missing': sorted(set(expected)-actual)}
     for name, digest in expected.items():
         assert hashlib.sha256((root / name).read_bytes()).hexdigest() == digest, name
     for path in root.rglob('*.py'):
@@ -27,10 +31,14 @@ def main():
     for path in (root / 'js').glob('*.js'):
         for name in re.findall(r'from\s+[\'"]([^\'"]+)[\'"]', path.read_text(encoding='utf-8')):
             if name.startswith('./'):
-                assert (path.parent / name).is_file(), (path, name)
+                assert (path.parent / name.split('?', 1)[0]).is_file(), (path, name)
     vendor = (root / '_loop_vendor.py').read_bytes().replace(b'\r\n', b'\n')
     assert hashlib.sha1(b'blob ' + str(len(vendor)).encode() + b'\0' + vendor).hexdigest() == '436156f86671cbc00bd7b2f68c8de36ac6d6e673'
     assert len(json.loads((root / 'nodes_manifest.json').read_text(encoding='utf-8'))) == 23
+    baseline = json.loads((root / 'manifests/core-baseline.json').read_text('utf-8'))
+    for name, digest in baseline['files'].items():
+        assert hashlib.sha256((root / name).read_bytes()).hexdigest() == digest, ('core changed', name)
+    assert set(json.loads((root / 'node_list.json').read_text('utf-8'))) == set(json.loads((root / 'nodes_manifest.json').read_text('utf-8')))
     print(f'PASS: {len(expected)} checksums, Python syntax, local imports, JS local imports, pinned Loop source, 23 node IDs.')
 
 

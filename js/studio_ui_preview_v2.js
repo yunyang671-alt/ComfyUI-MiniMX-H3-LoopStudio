@@ -1,5 +1,6 @@
-import { seedControl } from "./seed_control.js";
-import { installLoopControls } from "./loop_controls.js";
+import { seedControl } from "./seed_control.js?v=ui-preview-2";
+import { restoreStudioDefaults } from "./ui_defaults.js?v=ui-preview-2";
+import { installLoopControls, applyLoopSamplingProfile } from "./studio_ui_controls.js?v=ui-preview-2";
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 
@@ -530,7 +531,7 @@ function build(node) {
     if (applyingPerformancePreset || !manualModelFields.has(name)) return;
     setW(node, "自定义模型配置", true);
     node.__wwh3PresetKey = "custom";
-    modelSummary.textContent = "自定义模型配置（优选档暂时失效）";
+    modelSummary.textContent = "手动模型与 LoRA 配置";
     speedButtons?.forEach?.((button) => button.classList.remove("on"));
   });
   modelSection.append(modelDetails);
@@ -1323,120 +1324,18 @@ function build(node) {
     if (visible) visible.value = desired;
     updateEnhanceUI();
   };
-  const autoCorrectModel = (modeName = currentMode()) => {
-    if (w(node, "启用周期循环")?.value) return String(w(node, "模型")?.value || "");
-    const modelWidget = w(node, "模型");
-    const installed = values(modelWidget).map(String);
-    if (!modelWidget || !installed.length) return "";
-    const lower = (value) => String(value || "").replaceAll("\\", "/").toLowerCase();
-    const current = String(modelWidget.value || "");
-    if (modeName === "视频编辑") return current;
-    const needsFl = ["文生视频", "图生视频", "首尾帧"].includes(modeName);
-    const correctFamily = needsFl ? "minimax_h3_fl2va" : "minimax_h3_ref2va";
-    let chosen = current;
-    if (!lower(current).includes(correctFamily)) {
-      const family = installed.filter((value) => lower(value).includes(correctFamily));
-      chosen = needsFl
-        ? family.find((value) => lower(value).includes("int8_convrot")) || family[0] || ""
-        : family.find((value) => lower(value).includes("int8_convrot") && !lower(value).includes("pruned"))
-          || family.find((value) => lower(value).includes("int8_convrot")) || family[0] || "";
+  const autoCorrectModel = () => String(w(node, "模型")?.value || "");
+  const applyPerformancePreset = (modeName = currentMode(), profile = String(w(node, "视频编辑模式")?.value || "均衡8步")) => {
+    if (!applyLoopSamplingProfile(node, profile)) {
+      setW(node, "采样步数", profile === "极速4步" ? 4 : profile === "质量20步" ? 20 : 8);
+      setW(node, "自定义模型配置", true);
     }
-    if (!chosen || chosen === current) return current;
-    setW(node, "模型", chosen);
-    const visibleModel = root.querySelector('[data-widget-name="模型"]');
-    if (visibleModel) visibleModel.value = chosen;
-    modelSummary.textContent = `已按${modeName}自动选择：${chosen.split(/[\\/]/).pop()}`;
-    return chosen;
-  };
-    const applyPerformancePreset = (modeName = currentMode(), profile = String(w(node, "视频编辑模式")?.value || "均衡8步")) => {
-    if (w(node, "启用周期循环")?.value) { node.__wwh3PresetKey = `${modeName}|${profile}`; return String(w(node, "模型")?.value || ""); }
-    applyingPerformancePreset = true;
-    setW(node, "自定义模型配置", false);
-    setW(node, "采样步数", profile === "极速4步" ? 4 : profile === "质量20步" ? 20 : 8);
-    try {
-    const modelWidget = w(node, "模型");
-    const installedModels = values(modelWidget).map(String);
-    const lower = (value) => String(value || "").replaceAll("\\", "/").toLowerCase();
-    const compact = (value) => lower(value).replace(/[^a-z0-9]/g, "");
-    const flFamily = ["文生视频", "图生视频", "首尾帧"].includes(modeName)
-      || (modeName === "多参考" && profile === "极速4步");
-    const familyTag = flFamily ? "minimaxh3fl2va" : "minimaxh3ref2va";
-    const h3Models = installedModels.filter((value) => {
-      const name = compact(value);
-      return name.includes("minimaxh3") && (name.includes("fl2va") || name.includes("ref2va"));
-    });
-    const familyModels = h3Models.filter((value) => compact(value).includes(familyTag));
-    const pick = (...predicates) => {
-      for (const predicate of predicates) {
-        const match = familyModels.find((value) => predicate(lower(value)));
-        if (match) return match;
-      }
-      return familyModels[0] || "";
-    };
-    let chosen = "";
-    if (profile === "极速4步") {
-      chosen = pick(
-        (value) => value.includes("kijai_") && value.includes("w4a8_mixed"),
-        (value) => value.includes("w4a8"),
-        (value) => value.includes("int8_convrot"),
-        (value) => value.includes("bf16"),
-      );
-    } else if (profile === "质量20步") {
-      chosen = pick(
-        (value) => value.includes("comfy-org_") && value.includes("bf16"),
-        (value) => value.includes("bf16"),
-        (value) => value.includes("int8_convrot") && !value.includes("pruned"),
-        (value) => value.includes("int8_convrot"),
-        (value) => value.includes("w4a8"),
-      );
-    } else {
-      chosen = pick(
-        (value) => value.includes("int8_convrot") && !value.includes("pruned"),
-        (value) => value.includes("int8_convrot"),
-        (value) => value.includes("w4a8"),
-        (value) => value.includes("bf16"),
-      );
-    }
-    if (["极速4步", "均衡8步"].includes(profile)) chosen = installedModels.find(value => lower(value).endsWith("minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors")) || chosen;
-    if (chosen) setW(node, "模型", chosen);
-    setW(node, "模型权重精度", "default");
-    const loraWidget = w(node, "LoRA1");
-    const installedLoras = values(loraWidget).map(String);
-    let selectedTurbo = "";
-      if (profile === "极速4步" || profile === "均衡8步") {
-        const turbo = pickMinimaxH3TurboLora(installedLoras);
-      selectedTurbo = turbo || "";
-      setW(node, "LoRA1", turbo || "无");
-      setW(node, "LoRA1强度", turbo ? 0.75 : 1.0);
-    } else {
-      setW(node, "LoRA1", "无");
-      setW(node, "LoRA1强度", 1.0);
-    }
-    const nsfw = Boolean(w(node, "NSFW配置")?.value);
-    const nsfwLora = values(w(node, "LoRA2")).find(value => lower(value).endsWith("mysticxxx_mmh3-v2.safetensors"));
-    setW(node, "LoRA2", nsfw && nsfwLora ? nsfwLora : "无");
-    if (nsfw) setW(node, "LoRA2强度", 0.45);
-    const visibleModel = root.querySelector('[data-widget-name="模型"]');
-    if (visibleModel && chosen) visibleModel.value = chosen;
-    for (const name of ["LoRA1", "LoRA1强度", "LoRA2", "LoRA2强度", "模型权重精度"]) {
-      const visible = root.querySelector(`[data-widget-name="${name}"]`);
-      if (visible) visible.value = w(node, name)?.value ?? "";
-    }
-    const familyLabel = flFamily ? "FL2VA" : "Ref2VA";
-    const chosenLower = lower(chosen);
-    const precision = chosenLower.includes("bf16") ? "BF16" : chosenLower.includes("int8") ? "INT8" : chosenLower.includes("w4a8") ? "W4A8" : "已有模型";
-    const label = `${familyLabel} ${precision}${selectedTurbo ? " + LoRA 0.75" : ""}`;
-    modelSummary.textContent = `${modeName === "数字人" ? "数字人对口型" : modeName} ${profile}：${label}${chosen ? ` · ${chosen.split(/[\\/]/).pop()}` : "（未找到匹配模型）"}`;
-    const profileButton = speedButtons?.find?.((button) => button.dataset.profile === profile);
-    const detail = profileButton?.querySelector("small");
-    if (detail) detail.textContent = `${profile.match(/\d+/)?.[0] || ""}步 · ${precision}${selectedTurbo ? " + 加速" : ""}`;
     node.__wwh3PresetKey = `${modeName}|${profile}`;
-    return chosen;
-    } finally {
-      applyingPerformancePreset = false;
-    }
+    modelSummary.textContent = `沿用所选模型与 LoRA · ${String(w(node, "模型")?.value || "")}`;
+    return String(w(node, "模型")?.value || "");
   };
   const selectMode = (name) => {
+    if (name !== "图生视频") setW(node, "启用周期循环", false);
     node.__wwh3I2vPromptIndex = null;
     node.__wwh3MvPromptIndex = null;
     node.__wwh3MultiRefSegmentIndex = null;
@@ -1507,11 +1406,22 @@ function build(node) {
   i2vLabelStyle.textContent = ".wwh3-i2v-submode:before{content:'图生视频模式'!important}";
   i2vSubmode.append(i2vLabelStyle);
   const i2vButtons = [];
-  for (const [label, enabled] of [["单图模式", false], ["连续拼接模式", true]]) {
+  for (const [label, enabled] of [["周期循环", false], ["单图模式", false], ["连续拼接模式", true]]) {
     const button = document.createElement("button");
     button.textContent = label;
+    button.dataset.i2vMode = label;
     button.onclick = () => {
+      const looping = label === "周期循环";
+      setW(node, "启用周期循环", looping);
+      if (looping) {
+        setW(node, "循环条件路线", "单图参考（推荐）");
+        setW(node, "循环上下文段数", 1);
+        setW(node, "循环视角", 1);
+        setW(node, "自定义模型配置", true);
+        setW(node, "二采高清分块", false);
+      }
       setW(node, "图生连续拼接", enabled);
+      if (looping) node.__miniMXLoopDurationCommit?.();
       node.__wwh3I2vPromptIndex = enabled ? 0 : null;
       setW(node, "图生当前图片序号", 1);
       if (enabled) {
@@ -1580,7 +1490,7 @@ function build(node) {
   videoEditProfile.style.gridTemplateColumns = "minmax(112px,.72fr) repeat(4,minmax(0,1fr))";
   const speedCaption = document.createElement("div");
   speedCaption.className = "wwh3-speed-caption";
-  speedCaption.innerHTML = "<strong>模型配置</strong><small>按本机模型自动分档</small>";
+  speedCaption.innerHTML = "<strong>模型配置</strong><small>仅调整采样；沿用模型与LoRA</small>";
   speedCaption.style.cursor = "pointer";
   speedCaption.title = "点击展开模型、VAE 与 LoRA 选项";
   speedCaption.onclick = () => {
@@ -1656,7 +1566,7 @@ function build(node) {
     speedButtons.forEach((button) => button.classList.remove("on"));
     customSpeed.classList.add("on");
     modelDetails.open = true;
-    modelSummary.textContent = `自定义模型配置 · ${steps}步（优选档暂时失效）`;
+    modelSummary.textContent = `手动采样 · ${steps}步；沿用所选模型与 LoRA`;
     node.__wwh3?.resizeForContent?.();
   };
   customSpeed.onclick = (event) => { if (event.target !== customSpeedInput) activateCustomSpeed(); };
@@ -1806,6 +1716,8 @@ function build(node) {
 
   const coreGrid = document.createElement("div");
   coreGrid.className = "wwh3-grid wwh3-core-grid";
+  coreGrid.style.gridTemplateColumns = "minmax(90px,1fr) minmax(140px,1.3fr) minmax(80px,.7fr) minmax(105px,.9fr) minmax(150px,1.25fr)";
+  coreGrid.style.alignItems = "start";
   const ratioControl = ratioField(node);
   const resolutionControl = resolutionField(node);
   const durationControl = field(node, "时长秒", "时长（秒）");
@@ -3063,7 +2975,13 @@ function build(node) {
     const multiRefContinuous = Boolean(w(node, "多参考连续拼接")?.value);
     multiRefButtons.forEach(([button, enabled]) => button.classList.toggle("on", enabled === multiRefContinuous));
     const i2vContinuous = Boolean(w(node, "图生连续拼接")?.value);
-    i2vButtons.forEach(([button, enabled]) => button.classList.toggle("on", enabled === i2vContinuous));
+    const i2vMode = w(node, "启用周期循环")?.value ? "周期循环" : i2vContinuous ? "连续拼接模式" : "单图模式";
+    i2vButtons.forEach(([button]) => {
+      const active = button.dataset.i2vMode === i2vMode;
+      button.classList.toggle("on", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    node.__miniMXLoopRefresh?.();
 
     videoEditSubmode.style.display = currentMode() === "视频编辑" ? "flex" : "none";
     videoEditToolButtons.forEach((button) => button.classList.toggle("on", button.dataset.tool === String(w(node, "视频编辑功能")?.value || "通用编辑")));
@@ -3074,8 +2992,20 @@ function build(node) {
     nsfwButton.classList.toggle("on", Boolean(w(node, "NSFW配置")?.value));
     nsfwButton.setAttribute("aria-pressed", String(Boolean(w(node, "NSFW配置")?.value)));
     const customModelConfig = Boolean(w(node, "自定义模型配置")?.value);
-      speedButtons.forEach((button) => button.classList.toggle("on", !Boolean(w(node,"SelfLift二采")?.value) && !customModelConfig && button.dataset.profile === String(w(node, "视频编辑模式")?.value || "均衡8步")));
-    customSpeed.classList.toggle("on", customModelConfig);
+    const loopComparison = Boolean(w(node, "启用周期循环")?.value);
+    const selfliftActive = Boolean(w(node, "SelfLift二采")?.value);
+    let namedProfileActive = false;
+    speedButtons.forEach((button) => {
+      const expectedSteps = button.dataset.profile === "极速4步" ? 4 : button.dataset.profile === "质量20步" ? 20 : 8;
+      const active = !selfliftActive && (loopComparison
+        ? Number(w(node, "采样步数")?.value) === expectedSteps
+        : !customModelConfig && button.dataset.profile === String(w(node, "视频编辑模式")?.value || "均衡8步"));
+      button.classList.toggle("on", active);
+      namedProfileActive ||= active;
+      const detail = button.querySelector?.("small");
+      if (detail) detail.textContent = loopComparison ? `${expectedSteps}步 · 沿用所选模型` : speedMeta[button.dataset.profile][2];
+    });
+    customSpeed.classList.toggle("on", customModelConfig && !selfliftActive && !(loopComparison && namedProfileActive));
     if (document.activeElement !== customSpeedInput) customSpeedInput.value = String(rememberedCustomSteps());
     rail.replaceChildren();
     let total = 0;
@@ -3238,6 +3168,8 @@ function build(node) {
 
   const sync = () => {
     storyboardControl.refresh();
+    resolutionControl.refresh();
+    node.__wwh3SeedSync?.();
     idea.value = w(node, "增强源提示词")?.value || w(node, "提示词")?.value || "";
     finalPrompt.value = w(node, "提示词")?.value || "";
     for (const input of root.querySelectorAll("[data-widget-name]")) {
@@ -3248,7 +3180,7 @@ function build(node) {
     }
     autoCorrectModel(currentMode());
       const presetKey = `${currentMode()}|${String(w(node, "视频编辑模式")?.value || "均衡8步")}`;
-    if (node.__wwh3PresetKey !== presetKey) applyPerformancePreset();
+    if (!w(node, "启用周期循环")?.value && node.__wwh3PresetKey !== presetKey) applyPerformancePreset();
     autoCorrectPromptTemplate(currentMode());
     updateEnhanceUI();
     renderMedia();
@@ -3274,6 +3206,7 @@ app.registerExtension({
     const created = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const result = created?.apply(this, arguments);
+      restoreStudioDefaults(this);
       repairMainState(this);
       for (const widget of this.widgets || []) hide(widget);
       this.color = "#08606b";
@@ -3364,6 +3297,15 @@ app.registerExtension({
         w(this, "云端APIKey").value = localKey;
       }
       setTimeout(() => {
+        if (w(this, "启用周期循环")?.value) {
+          setW(this, "循环条件路线", "单图参考（推荐）");
+          setW(this, "循环上下文段数", 1);
+          setW(this, "循环视角", 1);
+          const requested = Number(info.properties?.minimx_requested_loop_seconds);
+          const seconds = requested > 0 ? requested : Number(w(this, "循环正片帧数")?.value || 136) / 24;
+          setW(this, "时长秒", Number(seconds.toFixed(4)));
+          this.properties.minimx_requested_loop_seconds = seconds;
+        }
         repairMainState(this);
         this.__wwh3?.sync();
         this.__wwh3?.resizeForContent?.();

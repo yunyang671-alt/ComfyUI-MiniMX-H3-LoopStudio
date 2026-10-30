@@ -53,6 +53,7 @@ export function seedControl(node, field) {
     sync();
     return result;
   };
+  node.__wwh3SeedSync = sync;
   sync();
   return box;
 }
